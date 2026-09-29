@@ -13,6 +13,31 @@ constexpr double kMetersPerInch = 0.0254;
 constexpr double kLemlibFullPower = 127.0;
 constexpr double kOnAxisM = 1e-3; // lateral offset below this is the heading line
 
+// The curve is fitted to the far end of a straight finish of `line_length`
+// meters. The finish runs into the target along `approach`. on_line means
+// the robot is already on that segment. past means it has crossed the target.
+struct Finish {
+    double jx = 0, jy = 0;
+    double length = 0;
+    double along = 0;
+    bool on_line = false;
+    bool past = false;
+};
+
+Finish finishOf(double rx, double ry, double tx, double ty,
+                double approach, double line_length) {
+    Finish fin;
+    fin.length = line_length > 0.0 ? line_length : 0.0;
+    const double ux = std::cos(approach);
+    const double uy = std::sin(approach);
+    fin.jx = tx - fin.length * ux;
+    fin.jy = ty - fin.length * uy;
+    fin.along = (rx - tx) * ux + (ry - ty) * uy;
+    fin.past = fin.along > 1e-3;
+    fin.on_line = fin.length > 1e-4 && !fin.past && fin.along >= -fin.length - 1e-4;
+    return fin;
+}
+
 double voltsPerPower() {
     return System::MAX_VOLTS / kLemlibFullPower;
 }
@@ -213,18 +238,43 @@ ExpPath expThrough(double rx, double ry, double tx, double ty,
 int DriftCurve::samplePath(const Pose2d& from, Pose2d* out, int cap) const {
     if (out == nullptr || cap < 2) return 0;
     const DriftCurveTarget& target = this->target;
-    const double approach = target.exit_direction;
+    const double dist = std::hypot(target.x - from.x, target.y - from.y);
+    double approach = target.exit_direction;
+    if (target.ignore_direction && dist > 1e-4) {
+        approach = std::atan2(target.y - from.y, target.x - from.x);
+    }
     const Pose2d end{target.x, target.y, approach};
+    const Finish fin = finishOf(from.x, from.y, target.x, target.y,
+                                approach, target.line_length);
+    if (fin.on_line) {
+        out[0] = from;
+        out[1] = end;
+        return 2;
+    }
+
+    const bool to_join = fin.length > 1e-4 && !fin.past;
+    const double fit_x = to_join ? fin.jx : target.x;
+    const double fit_y = to_join ? fin.jy : target.y;
+    const Pose2d fit{fit_x, fit_y, approach};
+    int curve_cap = cap;
+    if (to_join && cap > 2) curve_cap = cap - 1;
+
+    auto append_finish = [&](int n) {
+        if (!to_join || n < 1 || n >= cap) return n;
+        out[n] = end;
+        return n + 1;
+    };
+
     if (config.shape == DriftCurveShape::Exponential) {
-        const ExpPath path = expThrough(from.x, from.y, target.x, target.y,
+        const ExpPath path = expThrough(from.x, from.y, fit_x, fit_y,
                                         approach, config.exp_rate);
         if (path.length_m < 1e-3) return 0;
         if (!path.graph) {
             out[0] = from;
-            out[1] = end;
-            return 2;
+            out[1] = fit;
+            return append_finish(2);
         }
-        int steps = cap - 1;
+        int steps = curve_cap - 1;
         if (steps > 48) steps = 48;
         const int n = steps + 1;
         for (int i = 0; i < n; ++i) {
@@ -237,21 +287,21 @@ int DriftCurve::samplePath(const Pose2d& from, Pose2d* out, int cap) const {
         }
         out[0].x = from.x;
         out[0].y = from.y;
-        out[n - 1].x = end.x;
-        out[n - 1].y = end.y;
-        return n;
+        out[n - 1].x = fit.x;
+        out[n - 1].y = fit.y;
+        return append_finish(n);
     }
 
-    const Arc arc = arcThrough(from.x, from.y, target.x, target.y, approach);
+    const Arc arc = arcThrough(from.x, from.y, fit_x, fit_y, approach);
     if (arc.length_m < 1e-3) return 0;
 
     if (!arc.curved) {
         out[0] = from;
-        out[1] = end;
-        return 2;
+        out[1] = fit;
+        return append_finish(2);
     }
 
-    int steps = cap - 1;
+    int steps = curve_cap - 1;
     if (steps > 48) steps = 48;
     const double a0 = std::atan2(from.y - arc.cy, from.x - arc.cx);
     const double dir = (arc.r > 0.0) ? 1.0 : -1.0;
@@ -266,9 +316,9 @@ int DriftCurve::samplePath(const Pose2d& from, Pose2d* out, int cap) const {
     }
     out[0].x = from.x;
     out[0].y = from.y;
-    out[n - 1].x = end.x;
-    out[n - 1].y = end.y;
-    return n;
+    out[n - 1].x = fit.x;
+    out[n - 1].y = fit.y;
+    return append_finish(n);
 }
 
 void DriftCurve::reset() {
@@ -289,29 +339,43 @@ ChassisCommand DriftCurve::compute(const StateEstimate& state) {
 
     // Exit velocity direction is the path tangent on arrival. Reversing
     // leaves that tangent alone and turns the nose to face the other way.
-    const double approach = target.exit_direction;
+    // ignore_direction uses the bearing to the target instead, so only the
+    // exit speed is imposed.
+    const double dist = std::hypot(tx - rx, ty - ry);
+    double approach = target.exit_direction;
+    if (target.ignore_direction && dist > 1e-4) {
+        approach = std::atan2(ty - ry, tx - rx);
+    }
     const double nose = config.forwards
         ? approach
         : mathutil::normalize_angle(approach + Robot::PI);
-
-    const double dist = std::hypot(tx - rx, ty - ry);
     const bool close = dist < config.close_m;
+    const Finish fin = finishOf(rx, ry, tx, ty, approach, target.line_length);
 
     double phi = approach;
     double kappa = 0.0;
     double length_m = dist;
-    if (dist > 1e-4) {
+    if (fin.on_line) {
+        // Already on the straight finish. Hold the exit heading to the target.
+        phi = approach;
+        kappa = 0.0;
+        length_m = -fin.along;
+    } else if (dist > 1e-4) {
+        const bool to_join = fin.length > 1e-4 && !fin.past;
+        const double fit_x = to_join ? fin.jx : tx;
+        const double fit_y = to_join ? fin.jy : ty;
         if (config.shape == DriftCurveShape::Exponential) {
-            const ExpPath path = expThrough(rx, ry, tx, ty, approach, config.exp_rate);
+            const ExpPath path = expThrough(rx, ry, fit_x, fit_y, approach, config.exp_rate);
             phi = path.phi;
             kappa = path.kappa;
             length_m = path.length_m;
         } else {
-            const Arc arc = arcThrough(rx, ry, tx, ty, approach);
+            const Arc arc = arcThrough(rx, ry, fit_x, fit_y, approach);
             phi = arc.phi;
             kappa = arc.kappa;
             length_m = arc.length_m;
         }
+        if (to_join) length_m += fin.length;
     }
     if (length_m < 0.0) length_m = 0.0;
 
@@ -342,7 +406,10 @@ ChassisCommand DriftCurve::compute(const StateEstimate& state) {
 
     double psi = mathutil::normalize_angle(phi + sigma);
     if (!config.forwards) psi = mathutil::normalize_angle(psi + Robot::PI);
-    if (stop_settle) psi = nose;
+    // A prescribed finish heading. With ignore_direction the nose stays
+    // where it is, and only the speed is driven to exit_speed.
+    if (stop_settle && !target.ignore_direction) psi = nose;
+    if (stop_settle && target.ignore_direction) psi = theta;
     goal_heading_ = psi;
 
     const double heading_deg = mathutil::normalize_angle(psi - theta) * (180.0 / Robot::PI);
@@ -352,8 +419,10 @@ ChassisCommand DriftCurve::compute(const StateEstimate& state) {
     const double heading_to_goal_deg =
         mathutil::normalize_angle(nose - theta) * (180.0 / Robot::PI);
     const double direction = config.forwards ? 1.0 : -1.0;
+    const bool heading_ok = target.ignore_direction
+        || std::fabs(heading_to_goal_deg) < small_deg;
     settled_ = (dist / kMetersPerInch) < small_in
-            && std::fabs(heading_to_goal_deg) < small_deg
+            && heading_ok
             && std::fabs(v_now - v_end) < 0.2;
 
     const double v_cmd = direction * v_plan;

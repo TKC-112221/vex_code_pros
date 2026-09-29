@@ -3,8 +3,8 @@
  * DriftCurveOverride  --  one user-input override: follow DriftCurve::target.
  *
  * Set the endpoint on driftCurve().target (x, y, exit direction, exit speed,
- * and optionally max_accel), then set g_drift_curve_on. g_drift_curve_abort
- * stops it. The default target
+ * optional max_accel, and line_length), then set g_drift_curve_on.
+ * g_drift_curve_abort stops it. The default target
  * is a stop at the origin, leaving along +X. A alone while idle arms whatever
  * target is currently stored.
  * ------------------------------------------------------------------------- */

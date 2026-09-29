@@ -3,11 +3,17 @@
  * DriftCurve  --  one control tick of a curve drive with DriftBoomerang's
  * sideslip heading.
  *
- * The path meets the target tangent to the target heading. shape picks
- * the family:
+ * The path meets the target along the exit direction. A straight finish of
+ * target.line_length meters runs into the target on that heading. The
+ * curve is fitted to the far end of that line, so it arrives tangent to
+ * the same heading and the line carries the robot the rest of the way.
+ * Zero length fits the curve to the target itself. With
+ * target.ignore_direction set, the exit heading is not used: the path is
+ * the straight line to the target, and only exit_speed is kept. shape
+ * picks the family:
  *
  *   Arc — the circle through the robot. Its center lies on the normal
- *   through the target, and the signed radius is
+ *   through the join, and the signed radius is
  *
  *     r = |robot - target|² / (2 * lateral)
  *
@@ -19,8 +25,8 @@
  *     lateral(ξ) ∝ e^{k ξ} − 1 − k ξ
  *
  *   with k = exp_rate (1/m). It passes through the robot, is flat at the
- *   target, and ξ is distance along the heading (negative behind the
- *   target). Positive k holds the offset and hooks in near the target.
+ *   join, and ξ is distance along the heading (negative behind the
+ *   join). Positive k holds the offset and hooks in near the join.
  *   Negative k sheds the offset early. Zero is the parabola ξ².
  *
  * The travel direction φ is the path tangent at the robot, pointed along
@@ -53,6 +59,8 @@
  *   static DriftCurve nav;
  *   nav.target = {0.0, 0.0, 0.0, 0.0};   // x, y, exit direction, exit speed
  *   nav.target.max_accel = 1.5;          // optional, m/s^2; else config.path_accel
+ *   nav.target.line_length = 0.3;        // meters of straight travel into the target
+ *   nav.target.ignore_direction = true;  // straight at the point; keep exit_speed
  *   nav.reset();
  *   out.commands = CommandVector::fromChassis(nav.compute(estimate));
  *
@@ -85,13 +93,18 @@ struct DriftCurveConfig {
 // One drive. Coordinates are meters. exit_direction is the field heading
 // of the velocity at the target (0 = +X, CCW positive). exit_speed is m/s
 // along that direction; 0 stops. max_accel is the most the speed may change,
-// in m/s^2. Leave it unset to use config.path_accel.
+// in m/s^2. Leave it unset to use config.path_accel. line_length is the
+// straight finish into the target, in meters. 0 fits the curve to the target.
+// ignore_direction drops exit_direction: the robot drives straight at the
+// point and only the exit speed is used.
 struct DriftCurveTarget {
     double x = 0;
     double y = 0;
     double exit_direction = 0;
     double exit_speed = 100;
     std::optional<double> max_accel;
+    double line_length = 0.5;
+    bool ignore_direction = false;
 };
 
 class DriftCurve {
