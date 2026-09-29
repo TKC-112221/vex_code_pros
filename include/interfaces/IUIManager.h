@@ -1,9 +1,10 @@
 #pragma once
 /* ---------------------------------------------------------------------------
  * IUIManager  --  the operator interface: screen output plus the mode/utility
- * buttons (record/sysid/debug/calibrate/save/load/auton-test). Mother interface
- * so an alternative front-end (brain LCD, different button map) shares one
- * contract with the pipeline.
+ * buttons (record/sysid/debug/calibrate/save/load/auton-test).
+ * Mother interface so an alternative front-end (brain LCD + controller, different
+ * button map)
+ * shares one contract with the pipeline.
  * ------------------------------------------------------------------------- */
 
 #include "core/Types.h"

@@ -8,11 +8,11 @@
 #include "config/Settings.h"
 #include "core/Gains.h"
 #include "math/MathUtils.h"
-#include "data/recorded_path.h"
-#include "data/skills_auto_recorded.h"
+#include "platform/RobotFile.h"
 #include "api.h"
 #include <cstdio>
 #include <cmath>
+#include <algorithm>
 
 using mathutil::normalize_angle;
 
@@ -38,12 +38,14 @@ static SubsystemCommand decodeRecordedBitmask(uint8_t bitmask) {
 
 void LogFrameReplayer::loadFromHeader() {
     length_ = 0;
-    const LogFrame* src = nullptr;
-    int src_len = 0;
-    if (Settings::SKILLS_MODE) { src = RECORDED_SKILLS_DATA; src_len = RECORDED_SKILLS_LEN; }
-    else                       { src = RECORDED_PATH_DATA;   src_len = RECORDED_PATH_LEN; }
-    for (int i = 0; i < src_len && i < System::MAX_RECORD_FRAMES; ++i) buffer_[i] = src[i];
-    length_ = src_len;
+    const char* filepath = Settings::SKILLS_MODE ? "/usd/skills_auto.bin" : "/usd/prematch.bin";
+    FILE* file = openRobotFile(filepath, "rb");
+    if (file) {
+        length_ = fread(buffer_.data(), sizeof(LogFrame), System::MAX_RECORD_FRAMES, file);
+        fclose(file);
+    } else {
+        printf("Error: Could not open %s from microSD card.\n", filepath);
+    }
 }
 
 void LogFrameReplayer::beginRecording(RobotMode mode, const Pose2d& /*startPose*/) {
@@ -52,9 +54,8 @@ void LogFrameReplayer::beginRecording(RobotMode mode, const Pose2d& /*startPose*
 }
 
 void LogFrameReplayer::recordFrame(const MotionTarget& target, const Pose2d& actual,
-                                   const ChassisCommand& applied, const SubsystemCommand& sub,
-                                   const ChassisObservation& obs,
-                                   double joy_fwd, double joy_turn,
+                                   const CommandVector& command, const ChassisCommand& applied,
+                                   const SubsystemCommand& sub, const ChassisObservation& obs,
                                    double lin_error, double ang_error) {
     if (length_ >= System::MAX_RECORD_FRAMES) return;
     LogFrame& f = buffer_[length_];
@@ -76,12 +77,13 @@ void LogFrameReplayer::recordFrame(const MotionTarget& target, const Pose2d& act
     f.actual_y = actual.y;
     f.actual_theta = actual.theta;
 
-    f.joy_fwd_cmd = joy_fwd;
-    f.joy_turn_cmd = joy_turn;
+    f.cmd_surge = command.surge;
+    f.cmd_sway  = command.sway;
+    f.cmd_yaw   = command.yaw;
 
-    // Post-safety applied effort back to per-wheel volts for the log.
-    f.req_l_volts = applied.linear - applied.angular;
-    f.req_r_volts = applied.linear + applied.angular;
+    f.applied_linear  = applied.linear;
+    f.applied_lateral = applied.lateral;
+    f.applied_angular = applied.angular;
 
     f.l_pos_deg = obs.left_pos_deg;   f.r_pos_deg = obs.right_pos_deg;
     f.l_vel_rpm = obs.left_vel_rpm;   f.r_vel_rpm = obs.right_vel_rpm;
@@ -97,30 +99,17 @@ void LogFrameReplayer::recordFrame(const MotionTarget& target, const Pose2d& act
 }
 
 void LogFrameReplayer::saveToConsole() {
-    if (recording_mode_ == RobotMode::SYSID_DRIVE) printf("\n---START_SYSID_CSV---\n");
-    else if (Settings::SKILLS_MODE)                printf("\n---START_TRAJ_SKILLS_CSV---\n");
-    else                                           printf("\n---START_TRAJ_PREMATCH_CSV---\n");
+    const char* filepath = (recording_mode_ == RobotMode::SYSID_DRIVE) ? "/usd/sysid.bin" :
+                           (Settings::SKILLS_MODE) ? "/usd/skills_auto.bin" : "/usd/prematch.bin";
 
-    printf("time,x,y,theta,v_ref,omega_ref,a_ref,alpha_ref,actual_x,actual_y,actual_theta,"
-           "lin_error,ang_error,joy_fwd,joy_turn,req_l_volts,req_r_volts,l_pos_deg,r_pos_deg,"
-           "l_vel_rpm,r_vel_rpm,l_curr,r_curr,batt_v,imu_acc_x,imu_acc_y,imu_heading,imu_rate_z,subsystems\n");
-
-    for (int i = 0; i < length_; ++i) {
-        LogFrame& f = buffer_[i];
-        printf("%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,"
-               "%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.2f,%.4f,%.4f,%.2f,%.4f,%d\n",
-               f.time, f.x, f.y, f.theta, f.v_ref, f.omega_ref, f.a_ref, f.alpha_ref,
-               f.actual_x, f.actual_y, f.actual_theta, f.lin_error, f.ang_error,
-               f.joy_fwd_cmd, f.joy_turn_cmd, f.req_l_volts, f.req_r_volts,
-               f.l_pos_deg, f.r_pos_deg, f.l_vel_rpm, f.r_vel_rpm,
-               f.l_current_amps, f.r_current_amps, f.battery_voltage,
-               f.imu_accel_x, f.imu_accel_y, f.imu_heading, f.imu_rate_z, f.subsystems);
-        pros::delay(5);
+    FILE* file = openRobotFile(filepath, "wb");
+    if (file) {
+        fwrite(buffer_.data(), sizeof(LogFrame), length_, file);
+        fclose(file);
+        printf("Successfully saved %d frames to %s\n", length_, filepath);
+    } else {
+        printf("Error: Could not save to %s. Is the microSD card inserted?\n", filepath);
     }
-
-    if (recording_mode_ == RobotMode::SYSID_DRIVE) printf("---END_SYSID_CSV---\n");
-    else if (Settings::SKILLS_MODE)                printf("---END_TRAJ_SKILLS_CSV---\n");
-    else                                           printf("---END_TRAJ_PREMATCH_CSV---\n");
 }
 
 Pose2d LogFrameReplayer::getStartPose() const {
@@ -176,10 +165,11 @@ MotionTarget LogFrameReplayer::getNextTarget(const Pose2d& pose, const ChassisOb
     target.accel_lin = lerp(f0.a_ref, f1.a_ref);
     target.accel_ang = lerp(f0.alpha_ref, f1.alpha_ref);
 
-    double interp_l = lerp(f0.req_l_volts, f1.req_l_volts);
-    double interp_r = lerp(f0.req_r_volts, f1.req_r_volts);
+    double interp_lin = lerp(f0.applied_linear,  f1.applied_linear);
+    double interp_lat = lerp(f0.applied_lateral, f1.applied_lateral);
+    double interp_ang = lerp(f0.applied_angular, f1.applied_angular);
 
-    // Optional wheel-position corrections (disabled by default).
+    // Optional wheel-position corrections (tank-oriented encoder channels).
     double ref_l = lerp(f0.l_pos_deg, f1.l_pos_deg);
     double ref_r = lerp(f0.r_pos_deg, f1.r_pos_deg);
     double delta_ref_l = ref_l - ref_l_0_;
@@ -193,22 +183,24 @@ MotionTarget LogFrameReplayer::getNextTarget(const Pose2d& pose, const ChassisOb
     double ang_err = normalize_angle(target.pose.theta - pose.theta);
     double wheel_ang_corr = CT::PID_ADJUSTMENT_REPLAY ? (-Replay::WHEEL_ANG_KP * ang_err) : 0.0;
 
-    // Recorded chassis feedforward (+ corrections), reconstructed from wheels.
-    target.ref_linear_effort  = (interp_l + interp_r) / 2.0 + wheel_lin_corr;
-    target.ref_angular_effort = (interp_r - interp_l) / 2.0 - wheel_ang_corr;
+    target.ref_linear_effort  = interp_lin + wheel_lin_corr;
+    target.ref_lateral_effort = interp_lat;
+    target.ref_angular_effort = interp_ang - wheel_ang_corr;
     target.passthrough_effort = CT::REPLAY_VOLTAGE_FALLBACK;
 
     current_sub_ = decodeRecordedBitmask(f0.subsystems);
 
     // Battery-aware time warp: slow playback when volts would saturate.
     double batt_scale = CT::BATTERY_SCALING ? (System::MAX_VOLTS / obs.battery_voltage) : 1.0;
-    double scaled_l = interp_l * batt_scale + wheel_lin_corr + wheel_ang_corr;
-    double scaled_r = interp_r * batt_scale + wheel_lin_corr - wheel_ang_corr;
+    double scaled_lin = (interp_lin + wheel_lin_corr) * batt_scale;
+    double scaled_lat = interp_lat * batt_scale;
+    double scaled_ang = (interp_ang - wheel_ang_corr) * batt_scale;
+    // Conservative saturation check in chassis effort space (max |axis|).
+    double peak = std::max({std::fabs(scaled_lin), std::fabs(scaled_lat), std::fabs(scaled_ang)});
     double warp = 1.0;
     double recorded_batt = f0.battery_voltage;
     if (recorded_batt > 5.0 && obs.battery_voltage > 5.0) {
-        bool voltage_limited = (std::fabs(scaled_l) > obs.battery_voltage) ||
-                               (std::fabs(scaled_r) > obs.battery_voltage);
+        bool voltage_limited = peak > obs.battery_voltage;
         if (voltage_limited) {
             double ratio = obs.battery_voltage / recorded_batt;
             if (ratio < 1.0) warp *= ratio;

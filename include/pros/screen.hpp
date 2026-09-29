@@ -712,6 +712,11 @@ const char* convert_args(const std::string& arg) {
 
 } // namespace pros
 
+#if defined(_MSC_VER)
+/* Same COFF limitation as lcd_print in pros/llemu.h. */
+inline void lvgl_init() {}
+#else
 extern __attribute__((weak)) void lvgl_init() {}
+#endif
 ///@}
 #endif //header guard

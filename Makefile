@@ -12,7 +12,7 @@ BINDIR=$(ROOT)/bin
 SRCDIR=$(ROOT)/src
 INCDIR=$(ROOT)/include
 
-WARNFLAGS+=
+WARNFLAGS+=-Wall -Wextra -Wpedantic -Wconversion
 EXTRA_CFLAGS=
 EXTRA_CXXFLAGS=
 
@@ -39,9 +39,26 @@ EXCLUDE_SRC_FROM_LIB+=$(foreach file, $(SRCDIR)/main,$(foreach cext,$(CEXTS),$(f
 # that are in the directory include/LIBNAME
 TEMPLATE_FILES=$(INCDIR)/$(LIBNAME)/*.h $(INCDIR)/$(LIBNAME)/*.hpp
 
+# Desktop simulation (src/host) is not part of the V5 image.
+EXCLUDE_SRCDIRS=$(SRCDIR)/host
+
 .DEFAULT_GOAL=quick
 
 ################################################################################
 ################################################################################
 ########## Nothing below this line should be edited by typical users ###########
 -include ./common.mk
+
+# Desktop simulation. Defines ROBOT_HOST, links src/host, and leaves the
+# physical chassis (TankDrive / XDrive / ParenthesisDrive) out of the link.
+# The V5 image is `make quick` and does not define ROBOT_HOST.
+HOST_CXX ?= clang++
+HOST_CXXFLAGS := --std=gnu++26 -I./include -D_POSIX_THREADS -D_UNIX98_THREAD_MUTEX_ATTRIBUTES -D_POSIX_TIMERS -D_POSIX_MONOTONIC_CLOCK -D_USE_MATH_DEFINES -D_PROS_KERNEL_SUPPRESS_LLEMU_WARNING -DROBOT_HOST=1 -g -Os
+HOST_SRCS := $(wildcard src/main.cpp src/control/*.cpp src/estimators/*.cpp src/logic/*.cpp src/math/*.cpp src/trajectory/*.cpp src/platform/*.cpp src/host/*.cpp)
+HOST_LIBS := -luser32 -lgdi32
+
+.PHONY: host
+host: simulation_bin.exe
+
+simulation_bin.exe: $(HOST_SRCS)
+	$(HOST_CXX) $(HOST_CXXFLAGS) $(HOST_SRCS) $(HOST_LIBS) -o $@

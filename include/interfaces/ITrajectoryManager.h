@@ -19,13 +19,17 @@ public:
 
     // --- Recording ---
     virtual void beginRecording(RobotMode mode, const Pose2d& startPose) = 0;
-    // `applied` is the post-safety chassis effort; joy_* are the shaped stick
-    // values; *_error are the controller's tracking diagnostics for this tick.
-    virtual void recordFrame(const MotionTarget& target, const Pose2d& actual,
-                             const ChassisCommand& applied, const SubsystemCommand& sub,
+    // `command` is the chassis-frame intent (surge/sway/yaw); `applied` is the
+    // post-safety chassis effort actually sent to the drivebase. Neither is
+    // stick- or wheel-specific. *_error are controller diagnostics for this tick.
+    virtual void recordFrame(const MotionTarget& target,
+                             const Pose2d& actual,
+                             const CommandVector& command,
+                             const ChassisCommand& applied,
+                             const SubsystemCommand& sub,
                              const ChassisObservation& obs,
-                             double joy_fwd, double joy_turn,
-                             double lin_error, double ang_error) = 0;
+                             double lin_error,
+                             double ang_error) = 0;
     virtual int  getFrameCount() const = 0;
 
     // --- Replay (motion source) ---

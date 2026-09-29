@@ -1,7 +1,8 @@
 #pragma once
 /* ---------------------------------------------------------------------------
  * Gains.h  --  The Software: PID gains, Ramsete constants, curve/slew tuning,
- * teleop face/pivot behavior, replay corrections. Ported verbatim from v1
+ * teleop face/pivot behavior, replay corrections, boomerang sample gains.
+ * Face/pivot/replay ported verbatim from v1
  * (constants/gains.h). These are the numbers you retune during practice.
  * ------------------------------------------------------------------------- */
 
@@ -57,4 +58,29 @@ namespace Replay {
 namespace Controls {
     constexpr double TINY_BRAKE_VOLTAGE  = 0.3;
     constexpr double STICK_ZERO_DEADBAND = 0.02;
+}
+
+// LemLib's sample ControllerSettings for moveToPose (boomerang). Retune on
+// the robot. Lateral error is inches, angular error is degrees, and the PID
+// output is motor power in [-127, 127] (127 power == System::MAX_VOLTS).
+// The derivative is per 10 ms tick, matching LemLib's loop, not per second.
+namespace Boomerang {
+    struct Axis {
+        double kP, kI, kD, windup;
+        double small_error, small_ms;
+        double large_error, large_ms;
+        double slew; // max power change per tick; 0 disables
+    };
+
+    constexpr Axis Lateral = {10, 0, 3, 3, 1, 100, 3, 500, 5};
+    constexpr Axis Angular = {5, 0, 10, 3, 1, 100, 3, 500, 0};
+
+    // Hardcoded in LemLib's moveToPose, not in MoveToPoseParams.
+    constexpr double CLOSE_IN = 7.5;
+    constexpr double CLOSE_MIN_POWER = 60.0;
+
+    // Inches off the arrival arc before this tick's forward power is scaled
+    // by CROSS_TRACK_IN / error. Under the threshold the distance PID is left
+    // alone.
+    constexpr double CROSS_TRACK_IN = 4.0;
 }

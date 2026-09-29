@@ -3,21 +3,23 @@
  * CascadedController  --  v1's adaptive follower, re-expressed as an IController.
  *
  * Pipeline: reference warp -> (Ramsete OR position-PID) pose correction ->
- * neural feedforward (or recorded-volt feedforward) -> velocity PID feedback.
+ * injected feedforward (or recorded-volt feedforward) -> velocity PID feedback.
  * The controller carries an internal EKF purely to smooth measured velocity and
  * the command-derivative used for feedforward and the PID D-term, exactly as in
  * v1. Its output is a chassis-frame effort; the DriveBase mixes to actuators.
  * ------------------------------------------------------------------------- */
 
 #include "interfaces/IController.h"
+#include "interfaces/IFeedForward.h"
 #include "interfaces/IMotionLimiter.h"
 #include "control/StaticMotionLimiter.h"   // defaultMotionLimiter()
 #include "math/ExtendedKalmanFilter.h"
 
 class CascadedController : public IController {
 public:
-    explicit CascadedController(const IMotionLimiter& limiter = defaultMotionLimiter())
-        : limiter_(&limiter) {}
+    explicit CascadedController(const IFeedForward& feedforward,
+                                const IMotionLimiter& limiter = defaultMotionLimiter())
+        : feedforward_(&feedforward), limiter_(&limiter) {}
 
     void init() override;
     void reset() override;
@@ -40,6 +42,7 @@ private:
     double prev_v_cmd = 0, prev_omega_cmd = 0;
 
     ExtendedKalmanFilter ekf_;
+    const IFeedForward* feedforward_;
     const IMotionLimiter* limiter_;
 
     // Diagnostics from the last call

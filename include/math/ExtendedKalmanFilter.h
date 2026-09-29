@@ -24,6 +24,8 @@ public:
     void update_pose(double meas_x, double meas_y, double meas_theta);
     void update_velocity(double meas_v, double meas_omega);
     void update_accel_cmd(double raw_a_cmd, double raw_alpha_cmd);
+    // Scalar measurement y = H x. innov is (z - h(x)). Used for wall ranges.
+    void update_linear(const double H[N], double innov, double r_var);
 
     double get_v_est() const        { return x[3]; }
     double get_omega_est() const    { return x[4]; }

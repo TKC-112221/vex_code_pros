@@ -15,8 +15,6 @@ struct TeleopDrive {
     bool direct = false;          // true -> use `command`; false -> use `target`
     ChassisCommand command;
     MotionTarget target;
-    double curved_forward = 0;    // shaped stick values (for logging)
-    double curved_turn = 0;
 };
 
 class ITeleopSource {

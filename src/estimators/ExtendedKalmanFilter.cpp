@@ -124,6 +124,32 @@ void ExtendedKalmanFilter::update_velocity(double meas_v, double meas_omega) {
     }
 }
 
+void ExtendedKalmanFilter::update_linear(const double H[N], double innov, double r_var) {
+    double PHt[N];
+    for (int i = 0; i < N; ++i) {
+        PHt[i] = 0.0;
+        for (int j = 0; j < N; ++j) PHt[i] += P[i][j] * H[j];
+    }
+    double S = r_var;
+    for (int j = 0; j < N; ++j) S += H[j] * PHt[j];
+    if (!(S > 1e-12) || !std::isfinite(S) || !std::isfinite(innov)) return;
+
+    double K[N];
+    for (int i = 0; i < N; ++i) {
+        K[i] = PHt[i] / S;
+        x[i] += K[i] * innov;
+    }
+    x[2] = normalize_angle_ekf(x[2]);
+    for (int i = 0; i < N; ++i)
+        for (int j = 0; j < N; ++j)
+            P[i][j] -= K[i] * PHt[j];
+    for (int i = 0; i < N; ++i)
+        for (int j = i + 1; j < N; ++j) {
+            double v = 0.5 * (P[i][j] + P[j][i]);
+            P[i][j] = P[j][i] = v;
+        }
+}
+
 void ExtendedKalmanFilter::update_accel_cmd(double raw_a_cmd, double raw_alpha_cmd) {
     double innov[2] = { raw_a_cmd - x[7], raw_alpha_cmd - x[8] };
     for (int m = 0; m < 2; ++m) {

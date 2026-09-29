@@ -5,7 +5,6 @@
  * chassis-frame ChassisCommand{linear, angular} instead of {left, right}.
  * ------------------------------------------------------------------------- */
 #include "control/CascadedController.h"
-#include "math/NeuralFeedforward.h"
 #include "math/MathUtils.h"
 #include "core/Specs.h"
 #include "core/Gains.h"
@@ -47,7 +46,8 @@ ChassisCommand CascadedController::computeCommand(const Pose2d& pose,
         angular_error_ = normalize_angle(target.pose.theta - pose.theta);
         time_warp_ = 1.0;
         ChassisCommand c;
-        c.linear = target.ref_linear_effort;
+        c.linear  = target.ref_linear_effort;
+        c.lateral = target.ref_lateral_effort;
         c.angular = target.ref_angular_effort;
         return c;
     }
@@ -142,18 +142,20 @@ ChassisCommand CascadedController::computeCommand(const Pose2d& pose,
     double a_cmd = ekf_.get_a_cmd_est();
     double alpha_cmd = ekf_.get_alpha_cmd_est();
 
-    double vol_lin_ff, vol_ang_ff;
+    double vol_lin_ff, vol_lat_ff, vol_ang_ff;
     if (CT::USE_RECORDED_VOLTS) {
         // Recorded chassis effort as feedforward base (0 in teleop -> PID-only).
         vol_lin_ff = target.ref_linear_effort;
+        vol_lat_ff = target.ref_lateral_effort;
         vol_ang_ff = target.ref_angular_effort;
     } else {
         double turn_radius = (std::fabs(omega_cmd) < 0.01) ? Physics::TURN_RADIUS_MAX_M
                            : std::min(std::fabs(v_cmd) / (std::fabs(omega_cmd) + 0.01), Physics::TURN_RADIUS_MAX_M);
-        vol_lin_ff = NeuralFeedforward::linearVolts(v_cmd, a_cmd * s_sq, std::fabs(v_cmd),
-                                                    std::fabs(a_cmd * s_sq), omega_cmd, turn_radius);
-        vol_ang_ff = NeuralFeedforward::angularVolts(omega_cmd, alpha_cmd * s_sq, std::fabs(v_cmd),
-                                                     std::fabs(a_cmd * s_sq), turn_radius);
+        vol_lin_ff = feedforward_->linearVolts(v_cmd, a_cmd * s_sq, std::fabs(v_cmd),
+                                               std::fabs(a_cmd * s_sq), omega_cmd, turn_radius);
+        vol_lat_ff = 0.0;  // no lateral dynamics model yet
+        vol_ang_ff = feedforward_->angularVolts(omega_cmd, alpha_cmd * s_sq, std::fabs(v_cmd),
+                                                std::fabs(a_cmd * s_sq), turn_radius);
     }
 
     // 6. Velocity PID feedback on EKF-smoothed velocity/derivatives.
@@ -182,8 +184,8 @@ ChassisCommand CascadedController::computeCommand(const Pose2d& pose,
     //    (Angular effort predicts V_R - V_L, halved to apply per side downstream.)
     ChassisCommand cmd;
     cmd.linear  = vol_lin_ff * Gains::FF_BOOST_LIN + vol_pid_lin;
+    cmd.lateral = vol_lat_ff;  // passthrough recorded lateral; no lateral PID yet
     cmd.angular = (vol_ang_ff * Gains::FF_BOOST_ANG + vol_pid_ang) / 2.0;
-    cmd.lateral = 0.0;
     // Stick-zero brake is a per-actuator hardware behavior; the DriveBase
     // decides it from joystick idle + wheel velocity (see TankDrive).
 

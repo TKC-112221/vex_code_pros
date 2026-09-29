@@ -17,7 +17,6 @@
 #include "core/Gains.h"
 #include "core/Limits.h"
 #include "math/MathUtils.h"
-#include "math/NeuralFeedforward.h"
 #include <algorithm>
 #include <cmath>
 
@@ -33,8 +32,8 @@ static inline std::int32_t pctToMv(int pct) {
     return static_cast<std::int32_t>(p * 120);   // 100% -> 12000 mV
 }
 
-TankDrive::TankDrive(double max_volts, bool scale_battery)
-    : max_voltage(max_volts), use_battery_scaling(scale_battery) {
+TankDrive::TankDrive(const IFeedForward& feedforward, double max_volts, bool scale_battery)
+    : feedforward_(&feedforward), max_voltage(max_volts), use_battery_scaling(scale_battery) {
     pilot = new pros::Controller(pros::E_CONTROLLER_MASTER);
     imu   = new pros::Imu(Ports::IMU);
 
@@ -80,9 +79,10 @@ void TankDrive::stop() {
 
 JoystickData TankDrive::readJoystick() {
     JoystickData joy;
-    joy.forward =  pilot->get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y)  / 127.0;
-    joy.turn    = -pilot->get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_X) / 127.0;
-    joy.strafe  = 0.0;   // no lateral axis on a differential drive
+    joy.left_y  =  pilot->get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y)  / 127.0;
+    joy.left_x  =  pilot->get_analog(pros::E_CONTROLLER_ANALOG_LEFT_X)  / 127.0;
+    joy.right_y =  pilot->get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_Y) / 127.0;
+    joy.right_x =  pilot->get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_X) / 127.0;
     return joy;
 }
 
@@ -150,12 +150,16 @@ ChassisObservation TankDrive::readObservation(double prev_heading_rad) {
     return o;
 }
 
+void TankDrive::readDistances(DistanceReading (&out)[kDistanceChannels]) {
+    ranges_.read(out);
+}
+
 // Back-EMF current limit: clamp each side to its predicted EMF +/- max drop.
 void TankDrive::applyCurrentLimit(double& left_v, double& right_v, double v_lin, double v_ang) const {
     double turn_r = (std::fabs(v_ang) < 0.01) ? Physics::TURN_RADIUS_MAX_M
                   : std::min(std::fabs(v_lin) / (std::fabs(v_ang) + 0.01), Physics::TURN_RADIUS_MAX_M);
-    double v_avg_emf = NeuralFeedforward::linearVolts(v_lin, 0.0, std::fabs(v_lin), 0.0, v_ang, turn_r);
-    double v_diff_emf = NeuralFeedforward::angularVolts(v_ang, 0.0, std::fabs(v_lin), 0.0, turn_r);
+    double v_avg_emf = feedforward_->linearVolts(v_lin, 0.0, std::fabs(v_lin), 0.0, v_ang, turn_r);
+    double v_diff_emf = feedforward_->angularVolts(v_ang, 0.0, std::fabs(v_lin), 0.0, turn_r);
     double left_emf  = v_avg_emf - v_diff_emf / 2.0;
     double right_emf = v_avg_emf + v_diff_emf / 2.0;
     left_v  = clamp_val(left_v,  left_emf  - System::MAX_VOLTAGE_DROP, left_emf  + System::MAX_VOLTAGE_DROP);

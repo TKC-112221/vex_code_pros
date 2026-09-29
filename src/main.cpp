@@ -1,22 +1,19 @@
 /* ===========================================================================
  * main.cpp  --  PROS entry points + the universal robot pipeline.
  *
- * The pipeline loop is written entirely against abstract interfaces (IDriveBase,
- * IEstimator, IController, ITrajectoryManager) and drivebase-agnostic types
- * (Twist, ChassisCommand, MotionTarget). It never computes a left/right voltage
- * and never assumes a tank chassis. Swapping any stage -- a different drive
- * (XDrive/ParenthesisDrive), estimator (KalmanEstimator), or stick curve -- is a
- * one-line change in the WIRING block; the pipeline does not change.
+ * Dataflow each 10 ms tick (teleop / record):
+ *   sense -> curve sticks -> map sticks -> override -> process commands
+ *        -> actuate chassis -> subsystems -> telemetry -> record
  *
- * PROS lifecycle: initialize() sets everything up and launches the pipeline on a
- * background pros::Task; autonomous() and opcontrol() simply select the mode the
- * running pipeline acts on.
+ * Localization runs asynchronously on a separate pros::Task, consuming each
+ * SensorDict exactly once (no dropped travel deltas). The linear delta is the
+ * inertial accelerometer, integrated once here so every estimator shares it.
  *
- * Dataflow each 10 ms tick:
- *   sense -> estimate -> UI/state -> target -> control -> actuate -> record
+ * Replay still uses CascadedController for recorded MotionTarget following.
  * ========================================================================= */
 
 #include "main.h"
+#include "api.h"
 
 #include "core/Types.h"
 #include "core/Specs.h"
@@ -26,61 +23,92 @@
 #include "interfaces/IDriveBase.h"
 #include "interfaces/IEstimator.h"
 #include "interfaces/IController.h"
+#include "interfaces/IFeedForward.h"
 #include "interfaces/ITrajectoryManager.h"
+#include "interfaces/IVelocityMapper.h"
+#include "interfaces/ICommandProcessor.h"
+#include "interfaces/IDriveCurve.h"
 
 // ---- Concrete implementations (the only place types are named) ----
+// ROBOT_HOST is defined by the desktop link (make host). The V5 image is not.
+#if defined(ROBOT_HOST)
+#include "hardware/MockDrive.h"
+#include "host/FieldWindow.h"
+#else
 #include "hardware/TankDrive.h"
-#include "hardware/XDrive.h"            // holonomic swap-in
-#include "hardware/ParenthesisDrive.h" // 6-motor X + forward side wheels
+#include "hardware/XDrive.h"
+#include "hardware/ParenthesisDrive.h"
+#endif
+#include "estimators/ImuLinearDelta.h"
 #include "estimators/OdometryEstimator.h"
+#include "estimators/ParticleFilterEstimator.h"
+#include "estimators/SlipEnsembleEstimator.h"
 #include "control/CascadedController.h"
+#include "control/PassthroughController.h"
+#include "control/NeuralFeedforward.h"
+#include "control/VASController.h"
+#include <cmath>
 #include "trajectory/LogFrameReplayer.h"
-#include "curves/CubicDriveCurve.h"
-#include "logic/TeleopTargetGenerator.h"
 #include "logic/MacroController.h"
 #include "logic/UIManager.h"
-#include "control/StaticMotionLimiter.h"    // default command clamp
-#include "control/PhysicsMotionLimiter.h"   // physics-predicted command clamp
-#include "math/NeuralNetDynamics.h"         // the drivetrain "simulator"
+#include "logic/SensorReader.h"
+#include "logic/SensorCalibration.h"
+#include "logic/TankDriveVelocityMapper.h"
+#include "logic/UserInputOverride.h"
+#include "logic/DriftCurveOverride.h"
+#include "curves/CubicDriveCurve.h"
+#include "curves/LinearDriveCurve.h"
+#include "logic/SubsystemControl.h"
+#include "control/StaticMotionLimiter.h"
 
 // ============================ WIRING ======================================
-// Choose the concrete strategy for each pipeline stage here. To change the
-// chassis, swap the one line below -- nothing else in the project changes:
-//     TankDrive        g_hardware(...);   // 6-motor differential (default)
-//     XDrive           g_hardware(...);   // 4-omni holonomic
-//     ParenthesisDrive g_hardware(...);   // 4-omni + 2 forward side wheels
-CubicDriveCurve       g_curve(Tuning::CUBE_RATIO);
-TankDrive             g_hardware(System::MAX_VOLTS, Settings::ControlToggles::BATTERY_SCALING);
-OdometryEstimator     g_estimator;
-LogFrameReplayer      g_trajectory;
+// Swap g_feedforward for a VASController(kS, kV, kA, kS_ang, kV_ang, kA_ang)
+// to use the traditional armature model instead of the learned MLP.
+VASController         g_feedforward(0.2, (12.0-0.2)/4.0, 12.0/5.0, 0.2, 4.72*0.3556/2.0, 2.4*(2*0.1652)/(6*0.3556));
+#if defined(ROBOT_HOST)
+MockDrive             g_hardware(g_feedforward, System::MAX_VOLTS, Settings::ControlToggles::BATTERY_SCALING);
+#else
+TankDrive             g_hardware(g_feedforward, System::MAX_VOLTS, Settings::ControlToggles::BATTERY_SCALING);
+#endif
+OdometryEstimator g_estimator;
+// SlipEnsembleEstimator g_estimator;
+// ParticleFilterEstimator g_estimator;
+LogFrameReplayer*     g_trajectory = nullptr;
 MacroController       g_macros;
 UIManager             g_ui;
 
-// Command clamp (max vel/accel supplier). Default: fixed tuned ceilings, so the
-// build is byte-for-byte identical to the hardcoded limits. To predict feasible
-// ceilings from the drivetrain model at the current battery/velocity, swap to:
-//     NeuralNetDynamics    g_dynamics;
-//     PhysicsMotionLimiter g_limiter(g_dynamics);
-// and pass g_limiter to g_controller and g_teleop below.
-StaticMotionLimiter   g_limiter;
-
-CascadedController    g_controller(g_limiter);
-TeleopTargetGenerator g_teleop(g_curve, g_limiter);
+StaticMotionLimiter       g_limiter;
+CascadedController        g_replay_controller(g_feedforward, g_limiter);  // used for REPLAYING only
+PassthroughController     g_command_processor;
+TankDriveVelocityMapper   g_velocity_mapper(System::MAX_VOLTS);
+CubicDriveCurve           g_curve(Tuning::CUBE_RATIO);
+// LinearDriveCurve       g_curve;
 
 // The pipeline talks to these abstractions only.
-IDriveBase*         drive      = &g_hardware;
-IEstimator*         estimator  = &g_estimator;
-IController*        controller = &g_controller;
-ITrajectoryManager* trajectory = &g_trajectory;
-ITeleopSource*      teleop     = &g_teleop;
-IMacroController*   macros     = &g_macros;
-IUIManager*         ui         = &g_ui;
+IFeedForward*       feedforward       = &g_feedforward;
+IDriveBase*         drive             = &g_hardware;
+IEstimator*         estimator         = &g_estimator;
+IController*        replay_controller = &g_replay_controller;
+ITrajectoryManager* trajectory        = nullptr;
+IMacroController*   macros            = &g_macros;
+IUIManager*         ui                = &g_ui;
+IVelocityMapper*    velocity_mapper   = &g_velocity_mapper;
+ICommandProcessor*  command_processor = &g_command_processor;
+IDriveCurve*        drive_curve       = &g_curve;
 
 // ============================ SHARED STATE ================================
 RobotMode g_mode = RobotMode::IDLE;
 RobotMode g_last_recording_mode = RobotMode::RECORDING;
-double    g_prev_heading = 0.0;   // fed back to the drivebase for IMU-fallback
+
+pros::Mutex g_loc_mutex;
+ImuLinearDelta g_imu_delta;
+double      g_prev_heading = 0.0;
+SensorDict  g_pending_sensors{};
+bool        g_obs_pending = false;
+bool        g_localization_run = true;
+
 pros::Task* g_pipeline = nullptr;
+pros::Task* g_localization = nullptr;
 
 // Begin autonomous replay from the recorded start pose/heading.
 static void startReplay() {
@@ -88,126 +116,227 @@ static void startReplay() {
     g_mode = RobotMode::REPLAYING;
     trajectory->resetPlayback();
     drive->alignHeadingTo(trajectory->getStartHeading());
+    resetSensorFilters();
+
+    g_loc_mutex.take();
     estimator->overridePose(trajectory->getStartPose());
+    g_imu_delta.reset();
     g_prev_heading = trajectory->getStartHeading();
+    g_obs_pending = false;
+    g_loc_mutex.give();
+}
+
+static StateEstimate snapshotEstimate() {
+    g_loc_mutex.take();
+    StateEstimate est = estimator->getState();
+    g_loc_mutex.give();
+    return est;
+}
+
+static double snapshotTotalHeading() {
+    g_loc_mutex.take();
+    double h = estimator->getTotalHeading();
+    g_loc_mutex.give();
+    return h;
+}
+
+// Publish one sensor dict for the localization task. Linear travel is the
+// accelerometer integral; if the previous sample was not consumed yet, the
+// new travel is added so no step is dropped.
+static void publishSensors(SensorDict sensors) {
+    g_imu_delta.apply(sensors.chassis, System::DT_SEC,
+                      !Settings::ControlToggles::IMU_FALLBACK);
+    g_loc_mutex.take();
+    if (g_obs_pending) {
+        g_pending_sensors.chassis.forward_delta += sensors.chassis.forward_delta;
+        g_pending_sensors.chassis.strafe_delta += sensors.chassis.strafe_delta;
+        g_pending_sensors.chassis.heading_rad = sensors.chassis.heading_rad;
+        g_pending_sensors.chassis.v_lin = sensors.chassis.v_lin;
+        g_pending_sensors.chassis.v_ang = sensors.chassis.v_ang;
+        for(int i = 0; i < kDistanceChannels; ++i) {
+            g_pending_sensors.distance[i] = sensors.distance[i];
+        }
+    } else {
+        g_pending_sensors = sensors;
+        g_obs_pending = true;
+    }
+    g_loc_mutex.give();
+}
+
+// ============================ ASYNC LOCALIZATION ==========================
+void localization_task() {
+    while (g_localization_run) {
+        g_loc_mutex.take();
+        if (g_obs_pending) {
+            estimator->update(g_pending_sensors);
+            g_prev_heading = estimator->getState().pose.theta;
+            g_obs_pending = false;
+        }
+        g_loc_mutex.give();
+        pros::delay(5);
+    }
 }
 
 // ============================ THE PIPELINE ================================
 void robot_pipeline() {
     const uint32_t LOOP_MS = (uint32_t)System::LOOP_TIME_MS;
-    uint32_t timestamp = pros::millis();
 
     while (true) {
-        // --- 1. SENSE & ESTIMATE ---
-        ButtonState        buttons = drive->readButtons();
-        JoystickData       joy     = drive->readJoystick();
-        ChassisObservation obs     = drive->readObservation(g_prev_heading);
-        estimator->update(obs);
-        StateEstimate est = estimator->getState();
-        g_prev_heading = est.pose.theta;
+        // --- 1. SENSE (unified dict API) ---
+        g_loc_mutex.take();
+        double prev_heading = g_prev_heading;
+        g_loc_mutex.give();
+
+        RobotReading reading = readRobotInput(*drive, prev_heading);
+        publishSensors(reading.sensors);
+
+        StateEstimate est = snapshotEstimate();
 
         // --- 2. UI & MODE MANAGEMENT ---
-        RobotMode requested = ui->processStateToggles(buttons, g_mode);
+        RobotMode requested = ui->processStateToggles(reading.buttons, g_mode);
         if (requested != g_mode) {
             if (requested == RobotMode::RECORDING || requested == RobotMode::SYSID_DRIVE) {
                 trajectory->beginRecording(requested, est.pose);
-                controller->reset();
-                teleop->resetToPose(est.pose);
+                replay_controller->reset();
+                command_processor->reset();
                 g_last_recording_mode = requested;
             }
             g_mode = requested;
         }
-        ui->updateDisplay(g_mode, est.pose, estimator->getTotalHeading(),
-                           trajectory->getFrameCount(), g_last_recording_mode);
+        ui->updateDisplay(g_mode, est.pose, snapshotTotalHeading(),
+                          trajectory->getFrameCount(), g_last_recording_mode);
 
         // --- 2b. UTILITY BUTTONS ---
-        if (ui->checkSaveRequested(buttons) && g_mode == RobotMode::IDLE &&
+        if (ui->checkSaveRequested(reading.buttons) && g_mode == RobotMode::IDLE &&
             trajectory->getFrameCount() > 0) {
             ui->displayMessage("Dumping...");
             trajectory->saveToConsole();
             ui->displayMessage("Done!");
         }
-        if (ui->checkLoadRequested(buttons, g_mode)) trajectory->loadFromHeader();
-        if (ui->checkCalibrationRequested(buttons)) {
-            ui->displayMessage("CALIBRATING...");
-            drive->stop();
-            drive->calibrateSensors();
-            estimator->reset();
-            teleop->resetToPose(Pose2d{});
-            controller->reset();
-            g_prev_heading = 0.0;
-            ui->displayMessage("RESET COMPLETE");
+        if (ui->checkLoadRequested(reading.buttons, g_mode)) trajectory->loadFromHeader();
+        if (ui->checkCalibrationRequested(reading.buttons)) {
+            g_drift_curve_abort = true;
+            calibrateRobotSensors(*drive, *estimator, *command_processor, ui,
+                                  &g_loc_mutex, &g_prev_heading, &g_obs_pending);
+            g_imu_delta.reset();
             pros::delay(500);
         }
-        if (ui->checkAutonTestRequested(buttons)) startReplay();
+        if (ui->checkAutonTestRequested(reading.buttons)) {
+            g_drift_curve_abort = true;
+            startReplay();
+        }
 
         // --- 3. SAFETY ABORT (replay) ---
-        if (g_mode == RobotMode::REPLAYING && macros->isAbortRequested(buttons)) {
+        if (g_mode == RobotMode::REPLAYING && macros->isAbortRequested(reading.buttons)) {
             g_mode = RobotMode::IDLE;
             macros->notifyAbort(pros::millis());
             drive->stop();
         }
 
-        // --- 4. TARGET GENERATION, CONTROL, ACTUATION ---
+        // --- 4. TARGET / COMMAND / ACTUATION ---
         ChassisCommand   drive_cmd;
         SubsystemCommand sub_cmd;
-        TeleopDrive      td;          // retained for post-actuation recording
+        MotionTarget     record_target;
         bool recording = (g_mode == RobotMode::RECORDING || g_mode == RobotMode::SYSID_DRIVE);
 
         if (g_mode == RobotMode::REPLAYING) {
-            MotionTarget target = trajectory->getNextTarget(est.pose, obs);
+            MotionTarget target = trajectory->getNextTarget(est.pose, reading.sensors.chassis);
             if (trajectory->isFinished()) {
                 g_mode = RobotMode::IDLE;
                 drive->stop();
             } else {
-                drive_cmd = controller->computeCommand(est.pose, target, obs);
+                drive_cmd = replay_controller->computeCommand(est.pose, target, reading.sensors.chassis);
                 sub_cmd   = trajectory->getTargetSubsystems();
+                actuateSubsystems(*drive, sub_cmd);
+                drive->applyDrive(drive_cmd, reading.sensors.chassis);
             }
         } else {
-            td = teleop->generate(g_mode, joy, buttons, est.pose, obs);
-            sub_cmd = macros->processSubsystems(buttons, pros::millis());
-            if (td.direct) drive_cmd = td.command;
-            else           drive_cmd = controller->computeCommand(est.pose, td.target, obs);
+            // Captured before the curve so a small real deflection still aborts.
+            const JoystickData raw_joy = reading.joystick;
+
+            // curve each stick axis, then map to a velocity/command vector
+            JoystickData shaped = reading.joystick;
+            shaped.left_y  = drive_curve->apply(shaped.left_y);
+            shaped.left_x  = drive_curve->apply(shaped.left_x);
+            shaped.right_y = drive_curve->apply(shaped.right_y);
+            shaped.right_x = drive_curve->apply(shaped.right_x) * 0.6;
+            reading.joystick = shaped;
+
+            CommandVector mapped = velocity_mapper->map(reading.sensors.chassis.heading_rad,
+                                                        reading.joystick);
+
+            // An override replaces this while its run flag is set.
+            OverrideResult overridden = userInputOverride(reading.sensors.chassis, mapped,
+                                                          reading.buttons, est, raw_joy,
+                                                          g_mode, feedforward);
+            reading.buttons = overridden.buttons;
+
+            // mid-pipeline processor (default passthrough; hook for ghost/assists)
+            CommandVector processed = command_processor->process(reading, overridden.commands, est);
+
+            drive_cmd = processed.toChassis();
+
+            // Non-chassis subsystems (intake / rollers / pneumatics / ...)
+            sub_cmd = controlSubsystems(*drive, *macros, reading, processed, pros::millis());
+
+            // Actuate chassis from the processed command vector
+            ChassisCommand applied = drive->applyDrive(drive_cmd, reading.sensors.chassis);
+
+            // Recording: pose from estimate; effort lives in command + applied
+            // (chassis frame). Do not stuff volts into MotionTarget.velocity.
+            record_target.pose = est.pose;
+
+            if (recording) {
+                trajectory->recordFrame(record_target, est.pose, processed, applied, sub_cmd,
+                                        reading.sensors.chassis,
+                                        replay_controller->lastSpatialError(),
+                                        replay_controller->lastAngularError());
+            }
         }
 
-        // --- 5. ACTUATE (drivebase owns inverse kinematics + safety) ---
-        ChassisCommand applied = drive->applyDrive(drive_cmd, obs);
-        drive->applySubsystems(sub_cmd);
-
-        // --- 6. RECORD (after actuation, to log the applied effort) ---
-        if (recording) {
-            trajectory->recordFrame(td.target, est.pose, applied, sub_cmd, obs,
-                                    td.curved_forward, td.curved_turn,
-                                    controller->lastSpatialError(),
-                                    controller->lastAngularError());
-        }
-
-        // --- 7. SYNCHRONIZE ---
-        pros::Task::delay_until(&timestamp, LOOP_MS);
+        // --- 5. SYNCHRONIZE ---
+        // Sleep one control period. On the host, delay is the desktop stub and
+        // service() advances the simulated plant. On the brain, service() is empty.
+        pros::delay(LOOP_MS);
+#if defined(ROBOT_HOST)
+        Pose2d particles[50];
+        int particle_count = 0;
+        g_loc_mutex.take();
+        const Pose2d estimate = estimator->getState().pose;
+        particle_count = estimator->sampleParticles(particles, 50);
+        g_loc_mutex.give();
+        Pose2d curve[64];
+        int curve_n = userInputOverridePath(estimate, curve, 64);
+        fieldwindow::setFollowPath(curve, curve_n, curve_n >= 2);
+        drive->service(System::DT_SEC, estimate, particles, particle_count);
+#else
+        drive->service(System::DT_SEC, snapshotEstimate().pose);
+#endif
     }
 }
 
 // ============================ PROS ENTRY POINTS ===========================
 void initialize() {
+    feedforward->init();
     drive->initialize();
-    controller->init();
+    g_trajectory = new LogFrameReplayer();
+    trajectory   = g_trajectory;
+    replay_controller->init();
     estimator->initialize();
     if (trajectory->getFrameCount() == 0) trajectory->loadFromHeader();
 
-    ui->displayMessage("CALIBRATING...");
-    drive->stop();
-    drive->calibrateSensors();
-    estimator->reset();
-    teleop->resetToPose(Pose2d{});
-    controller->reset();
+    calibrateRobotSensors(*drive, *estimator, *command_processor, ui,
+                          &g_loc_mutex, &g_prev_heading, &g_obs_pending);
+    g_imu_delta.reset();
     ui->displayMessage("READY");
 
-    // Launch the core pipeline on a background task (runs across all modes).
-    g_pipeline = new pros::Task(robot_pipeline);
+    g_localization = new pros::Task(localization_task);
+    g_pipeline     = new pros::Task(robot_pipeline);
 }
 
 void disabled() {
     g_mode = RobotMode::IDLE;
+    g_drift_curve_abort = true;
     drive->stop();
 }
 
@@ -215,12 +344,10 @@ void competition_initialize() {}
 
 void autonomous() {
     startReplay();
-    // Occupy the autonomous period until the recorded path finishes or aborts.
     while (g_mode == RobotMode::REPLAYING) pros::delay(10);
 }
 
 void opcontrol() {
     g_mode = RobotMode::IDLE;
-    // The background pipeline drives teleop; just hold the period open.
     while (true) pros::delay(10);
 }

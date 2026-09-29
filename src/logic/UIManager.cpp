@@ -1,8 +1,7 @@
 /* ---------------------------------------------------------------------------
- * UIManager.cpp  --  controller screen + mode/utility buttons on the PROS API.
- * The V5 controller screen is rate-limited (unlike VEXcode), so periodic status
- * updates are throttled and lines are overwritten with padding instead of a
- * full clear each tick.
+ * UIManager.cpp  --  controller screen + brain LLEMU + mode/utility buttons.
+ * The V5 controller screen is rate-limited, so periodic status updates are
+ * throttled and lines are overwritten with padding instead of a full clear.
  * ------------------------------------------------------------------------- */
 #include "logic/UIManager.h"
 #include <cstdio>
@@ -10,12 +9,25 @@
 
 UIManager::UIManager() {
     ctrl_ = new pros::Controller(pros::E_CONTROLLER_MASTER);
+    // False on the host (no brain LCD). True on the V5 when LLEMU starts.
+    brain_ok_ = pros::lcd::initialize();
+}
+
+void UIManager::writeScreens(const char* l0, const char* l1, const char* l2) {
+    ctrl_->print(0, 0, "%-19s", l0);
+    ctrl_->print(1, 0, "%-19s", l1);
+    ctrl_->print(2, 0, "%-19s", l2);
+
+    if (brain_ok_) {
+        // Brain LLEMU has more columns; mirror the same three status lines.
+        pros::lcd::print(0, "%s", l0);
+        pros::lcd::print(1, "%s", l1);
+        pros::lcd::print(2, "%s", l2);
+    }
 }
 
 void UIManager::displayMessage(const char* msg) {
-    ctrl_->print(0, 0, "%-19s", msg);
-    ctrl_->print(1, 0, "%-19s", "");
-    ctrl_->print(2, 0, "%-19s", "");
+    writeScreens(msg, "", "");
 }
 
 RobotMode UIManager::processStateToggles(const ButtonState& btn, RobotMode mode) {
@@ -106,7 +118,5 @@ void UIManager::updateDisplay(RobotMode mode, const Pose2d& pose, double total_h
         }
     }
 
-    ctrl_->print(0, 0, "%-19s", l0);
-    ctrl_->print(1, 0, "%-19s", l1);
-    ctrl_->print(2, 0, "%-19s", l2);
+    writeScreens(l0, l1, l2);
 }

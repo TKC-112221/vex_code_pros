@@ -10,15 +10,21 @@
 
 namespace Ports {
     // Drive (smart ports)
-    constexpr int L1 = 15;
-    constexpr int L2 = 16;
-    constexpr int L3 = 20;
-    constexpr int R1 = 11;
+    constexpr int L1 = 14;
+    constexpr int L2 = 15;
+    constexpr int L3 = 16;
+    constexpr int R1 = 13;
     constexpr int R2 = 12;
-    constexpr int R3 = 13;
+    constexpr int R3 = 11;
 
     // Sensors
     constexpr int IMU = 10;
+    // Distance sensors. Beam geometry lives in Robot::Range::MOUNT
+    // (D1 front, D2 right, D3 rear, D4 left).
+    constexpr int D1 = 17;
+    constexpr int D2 = 18;
+    constexpr int D3 = 19;
+    constexpr int D4 = 20;
 
     // Subsystems (smart ports)
     constexpr int INTAKE        = 4;

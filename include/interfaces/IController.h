@@ -5,7 +5,7 @@
  * chassis DOFs (linear / lateral / angular) -- NEVER per-wheel voltages. The
  * DriveBase performs the final inverse kinematics.
  *
- * Descendants: CascadedController (v1's Ramsete/PID + neural feedforward).
+ * Descendants: CascadedController (v1's Ramsete/PID + injected feedforward).
  * ------------------------------------------------------------------------- */
 
 #include "core/Types.h"

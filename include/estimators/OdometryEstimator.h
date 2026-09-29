@@ -1,14 +1,18 @@
 #pragma once
 /* ---------------------------------------------------------------------------
- * OdometryEstimator  --  the default state estimator: pure trapezoidal
- * dead-reckoning, exactly matching v1's odometry behavior. Pose comes from
- * integrating wheel travel along the fused heading; velocity is passed through
- * from the drivebase's measured chassis velocities.
+ * OdometryEstimator  --  trapezoidal wheel odometry, plus a wall nudge.
+ *
+ * Pose comes from integrating wheel travel along the IMU heading, matching
+ * v1. Heading is the IMU measurement, so the distance sensors do not turn
+ * the pose: once per distance-sensor period they take one damped step in
+ * x/y toward the field walls. Velocity is passed through from the drivebase.
  * ------------------------------------------------------------------------- */
 
 #include "interfaces/IEstimator.h"
 #include "estimators/Odometry.h"
 #include "math/MathUtils.h"
+#include "math/WallRange.h"
+#include "core/Specs.h"
 
 class OdometryEstimator : public IEstimator {
 public:
@@ -17,15 +21,26 @@ public:
         total_heading_ = 0.0;
         prev_theta_ = 0.0;
         v_lin_ = v_ang_ = 0.0;
+        range_phase_ = 0;
     }
 
     void overridePose(const Pose2d& pose) override {
         odom_.setPose(pose);
         prev_theta_ = pose.theta;   // keep display delta continuous
+        range_phase_ = 0;
     }
 
-    void update(const ChassisObservation& obs) override {
+    void update(const SensorDict& sensors) override {
+        const ChassisObservation& obs = sensors.chassis;
         odom_.update(obs.forward_delta, obs.strafe_delta, obs.heading_rad);
+        // Once per distance-sensor period. The walls do not move, and the
+        // sensor does not publish a new range on the ticks in between.
+        if (range_phase_ == 0) {
+            wallrange::nudgePosition(odom_.pose.x, odom_.pose.y, odom_.pose.theta,
+                                     sensors.distance, kDistanceChannels,
+                                     kNudgeGain, kNudgeStepM, kRangeGateM);
+        }
+        range_phase_ = (range_phase_ + 1) % System::RANGE_STRIDE;
         // Unwrapped heading accumulator (display only).
         double d = mathutil::normalize_angle(odom_.pose.theta - prev_theta_);
         total_heading_ += d;
@@ -45,8 +60,13 @@ public:
     double getTotalHeading() const override { return total_heading_; }
 
 private:
+    static constexpr double kNudgeGain = 0.15; // fraction of the wall step
+    static constexpr double kNudgeStepM = 0.04;
+    static constexpr double kRangeGateM = 0.20;
+
     Odometry odom_;
     double total_heading_ = 0.0;
     double prev_theta_ = 0.0;
     double v_lin_ = 0.0, v_ang_ = 0.0;
+    int range_phase_ = 0;
 };

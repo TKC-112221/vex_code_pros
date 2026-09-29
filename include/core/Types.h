@@ -61,7 +61,8 @@ struct MotionTarget {
     // Chassis-frame recorded feedforward. In teleop these stay 0 (so a
     // "use recorded volts" controller naturally contributes zero feedforward,
     // matching v1). In replay the TrajectoryManager fills them from the log.
-    double ref_linear_effort = 0;
+    double ref_linear_effort  = 0;
+    double ref_lateral_effort = 0;
     double ref_angular_effort = 0;
     // If true, the controller outputs the recorded effort directly, skipping
     // feedback (models v1's REPLAY_VOLTAGE_FALLBACK path).
@@ -79,6 +80,21 @@ struct ChassisCommand {
     bool   brake = false; // request a gentle per-actuator brake (stick-zero)
 };
 
+// Pipeline command vector (plan vocabulary: surge / sway / yaw).
+// Same chassis-frame axes as ChassisCommand::{linear, lateral, angular}.
+struct CommandVector {
+    double surge = 0;   // forward
+    double sway  = 0;   // left (holonomic)
+    double yaw   = 0;   // CCW about vertical
+
+    ChassisCommand toChassis(bool brake = false) const {
+        return ChassisCommand{surge, sway, yaw, brake};
+    }
+    static CommandVector fromChassis(const ChassisCommand& c) {
+        return CommandVector{c.linear, c.lateral, c.angular};
+    }
+};
+
 // ---- Subsystem (non-drive) output ------------------------------------------
 struct SubsystemCommand {
     int  intake_pct = 0;
@@ -90,10 +106,12 @@ struct SubsystemCommand {
 };
 
 // ---- Raw human input -------------------------------------------------------
+// Four analog axes from the V5 controller, each normalized to -1.0 .. 1.0.
 struct JoystickData {
-    double forward = 0;  // -1.0 .. 1.0
-    double turn = 0;     // -1.0 .. 1.0
-    double strafe = 0;   // -1.0 .. 1.0 (holonomic; 0 on a tank controller map)
+    double left_y  = 0;  // Axis 1 — typically forward/back
+    double left_x  = 0;  // Axis 2 — typically strafe (holonomic)
+    double right_y = 0;  // Axis 3
+    double right_x = 0;  // Axis 4 — typically turn
 };
 
 struct ButtonState {
@@ -119,4 +137,44 @@ struct ChassisObservation {
     double left_current_amps = 0, right_current_amps = 0;
     double imu_accel_x = 0, imu_accel_y = 0;
     double imu_heading_deg = 0, imu_rate_z_dps = 0;
+};
+
+// One VEX distance-sensor sample. Invalid readings (no return, out of range,
+// PROS_ERR) have valid == false and are ignored by estimators.
+constexpr int kDistanceChannels = 4;
+
+struct DistanceReading {
+    double range_m = 0;    // meters along the beam
+    int    confidence = 0; // 0..63; PROS returns 10 at or below 200 mm
+    bool   valid = false;
+};
+
+// Named sensor bag for one control tick. Localization reads only the channels
+// it uses: chassis for dead reckoning, distance[0..3] for Ports::D1..D4.
+struct SensorDict {
+    ChassisObservation chassis{};
+    DistanceReading distance[kDistanceChannels]{};
+
+    const DistanceReading& d1() const { return distance[0]; }
+    const DistanceReading& d2() const { return distance[1]; }
+    const DistanceReading& d3() const { return distance[2]; }
+    const DistanceReading& d4() const { return distance[3]; }
+    DistanceReading& d1() { return distance[0]; }
+    DistanceReading& d2() { return distance[1]; }
+    DistanceReading& d3() { return distance[2]; }
+    DistanceReading& d4() { return distance[3]; }
+};
+
+// Unified sense package produced once per control tick. Every downstream stage
+// consumes this structure (or a slice of it) rather than re-reading hardware.
+struct RobotReading {
+    SensorDict   sensors{};
+    JoystickData joystick{};
+    ButtonState  buttons{};
+};
+
+// Output of the user-input-override stage.
+struct OverrideResult {
+    CommandVector commands{};
+    ButtonState   buttons{};
 };

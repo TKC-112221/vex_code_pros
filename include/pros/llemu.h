@@ -42,9 +42,19 @@ namespace c {
  * \return True if the operation was successful, or false otherwise, setting
  * errno values as specified above.
  */
+#if defined(_MSC_VER)
+/* COFF lld-link does not merge GNU weak symbols, so a body in this header
+   becomes a duplicate in every translation unit. inline is COMDAT instead.
+   weak must be omitted here: combined with inline, clang still emits a
+   strong external on the MSVC target. */
+inline bool lcd_print(__attribute__((unused)) int16_t line, __attribute__((unused)) const char* fmt, ...) {
+    return false;
+}
+#else
 bool __attribute__((weak)) lcd_print(__attribute__((unused)) int16_t line, __attribute__((unused)) const char* fmt, ...)  {
     return false;
 }
+#endif
 
 #ifdef __cplusplus
 } // namespace c

@@ -68,9 +68,10 @@ void XDrive::stop() {
 
 JoystickData XDrive::readJoystick() {
     JoystickData joy;
-    joy.forward =  pilot_->get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y)  / 127.0;
-    joy.turn    = -pilot_->get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_X) / 127.0;
-    joy.strafe  =  pilot_->get_analog(pros::E_CONTROLLER_ANALOG_LEFT_X)  / 127.0;   // holonomic
+    joy.left_y  =  pilot_->get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y)  / 127.0;
+    joy.left_x  =  pilot_->get_analog(pros::E_CONTROLLER_ANALOG_LEFT_X)  / 127.0;
+    joy.right_y =  pilot_->get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_Y) / 127.0;
+    joy.right_x =  pilot_->get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_X) / 127.0;
     return joy;
 }
 
@@ -158,6 +159,10 @@ ChassisObservation XDrive::readObservation(double prev_heading_rad) {
     o.left_current_amps  = (fl_->get_current_draw() + bl_->get_current_draw()) / 2000.0;
     o.right_current_amps = (fr_->get_current_draw() + br_->get_current_draw()) / 2000.0;
     return o;
+}
+
+void XDrive::readDistances(DistanceReading (&out)[kDistanceChannels]) {
+    ranges_.read(out);
 }
 
 ChassisCommand XDrive::applyDrive(const ChassisCommand& cmd, const ChassisObservation& /*obs*/) {

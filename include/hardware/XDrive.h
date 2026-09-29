@@ -20,6 +20,7 @@
  * ------------------------------------------------------------------------- */
 
 #include "interfaces/IDriveBase.h"
+#include "hardware/DistanceBank.h"
 #include "api.h"
 
 class XDrive : public IDriveBase {
@@ -34,6 +35,7 @@ public:
     ButtonState  readButtons() override;
 
     ChassisObservation readObservation(double prev_heading_rad) override;
+    void readDistances(DistanceReading (&out)[kDistanceChannels]) override;
     ChassisCommand applyDrive(const ChassisCommand& cmd, const ChassisObservation& obs) override;
     void applySubsystems(const SubsystemCommand& sub) override;
     void stop() override;
@@ -56,6 +58,7 @@ protected:
     bool   use_battery_scaling_;
     double prev_fl_ = 0, prev_fr_ = 0, prev_bl_ = 0, prev_br_ = 0;
     double imu_offset_ = 0.0;
+    DistanceBank ranges_;
 
     // Shared helpers reused by ParenthesisDrive.
     double batteryScale() const;                       // MAX_VOLTS/battery or 1

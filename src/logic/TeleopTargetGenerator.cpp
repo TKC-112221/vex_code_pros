@@ -38,8 +38,8 @@ TeleopDrive TeleopTargetGenerator::generate(RobotMode mode, const JoystickData& 
     //    ceilings and slew (accel) caps come from the injected limiter, so they
     //    can be fixed constants or physics-predicted for the current state.
     LimiterContext lim{ obs.v_lin, obs.v_ang, obs.battery_voltage };
-    double a3_cmd = curve_.apply(joy.forward);
-    double a1_cmd = curve_.apply(joy.turn);
+    double a3_cmd = curve_.apply(joy.left_y);
+    double a1_cmd = curve_.apply(-joy.right_x);
     double raw_v = lpf_linear_.apply(a3_cmd * limiter_.maxLinearVelocity(lim));
     double raw_w = lpf_angular_.apply(a1_cmd * limiter_.maxAngularVelocity(lim) * Tuning::TURN_INTENSITY);
     slew_linear_.setMaxStep(limiter_.maxLinearAccel(lim) * DT);
@@ -52,8 +52,6 @@ TeleopDrive TeleopTargetGenerator::generate(RobotMode mode, const JoystickData& 
     prev_target_omega_ = target_w;
 
     TeleopDrive result;
-    result.curved_forward = a3_cmd;
-    result.curved_turn = a1_cmd;
 
     const bool sysid = (mode == RobotMode::SYSID_DRIVE);
 

@@ -3,8 +3,7 @@
  * LogFrameReplayer  --  concrete ITrajectoryManager backed by a fixed LogFrame
  * buffer. Records live frames, dumps/loads them, and during replay emits an
  * interpolated MotionTarget each tick (with recorded chassis feedforward),
- * pacing playback with a battery-aware time-warp. Ported from v1's
- * robot_logic.cpp (save/load/replay) and the usercontrol logging block.
+ * pacing playback with a battery-aware time-warp.
  * ------------------------------------------------------------------------- */
 
 #include "interfaces/ITrajectoryManager.h"
@@ -18,11 +17,14 @@ public:
     void saveToConsole() override;
 
     void beginRecording(RobotMode mode, const Pose2d& startPose) override;
-    void recordFrame(const MotionTarget& target, const Pose2d& actual,
-                     const ChassisCommand& applied, const SubsystemCommand& sub,
+    void recordFrame(const MotionTarget& target,
+                     const Pose2d& actual,
+                     const CommandVector& command,
+                     const ChassisCommand& applied,
+                     const SubsystemCommand& sub,
                      const ChassisObservation& obs,
-                     double joy_fwd, double joy_turn,
-                     double lin_error, double ang_error) override;
+                     double lin_error,
+                     double ang_error) override;
     int getFrameCount() const override { return length_; }
 
     void resetPlayback() override;

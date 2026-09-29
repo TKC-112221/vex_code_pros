@@ -49,12 +49,13 @@ Each arrow is an interface, each box a swappable strategy:
 | Operator UI     | `IUIManager`          | `UIManager`             | —                            |
 | Command clamp   | `IMotionLimiter`      | `StaticMotionLimiter`   | `PhysicsMotionLimiter`       |
 | Dynamics model  | `IDynamicsModel`      | `NeuralNetDynamics`     | —                            |
+| Feedforward     | `IFeedForward`        | `NeuralFeedforward`     | `VASController`              |
 
 **Every** pipeline stage — including teleop drive-intent, button macros /
 subsystems, and the operator UI — now sits behind a mother interface, so any
 stage can be replaced without touching the others. (The pure-math helpers
-`Odometry`, `ExtendedKalmanFilter`, and `NeuralFeedforward` remain concrete
-utilities used *inside* stages, not swappable stages themselves.)
+`Odometry` and `ExtendedKalmanFilter` remain concrete utilities used *inside*
+stages, not swappable stages themselves.)
 
 ## Swapping a stage
 
@@ -117,7 +118,7 @@ than read from constants directly.
 Swap it in `main.cpp`'s wiring block:
 
 ```cpp
-NeuralNetDynamics    g_dynamics;
+NeuralNetDynamics    g_dynamics(g_feedforward);
 PhysicsMotionLimiter g_limiter(g_dynamics);   // replaces StaticMotionLimiter
 // g_controller and g_teleop already take g_limiter by reference
 ```
@@ -135,12 +136,12 @@ include/
   interfaces/  I* abstract superclasses
   hardware/    TankDrive, XDrive, ParenthesisDrive
   estimators/  Odometry, OdometryEstimator, KalmanEstimator
-  control/     CascadedController
+  control/     CascadedController, NeuralFeedforward, VASController
   filters/     LowPassFilter, SlewLimiter
   curves/      CubicDriveCurve, LinearDriveCurve
   logic/       TeleopTargetGenerator, MacroController, UIManager
   trajectory/  LogFrameReplayer
-  math/        MathUtils, ExtendedKalmanFilter, NeuralFeedforward
+  math/        MathUtils, ExtendedKalmanFilter, NeuralNetDynamics
   data/        auto-generated MLP weights, recorded paths, dynamics limits (reused from v1)
 src/           matching .cpp for the non-trivial classes + main.cpp
 ```

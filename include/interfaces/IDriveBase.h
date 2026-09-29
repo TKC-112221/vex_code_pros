@@ -29,6 +29,9 @@ public:
     // IMU-fallback mode, where heading is integrated from wheel deltas.
     virtual ChassisObservation readObservation(double prev_heading_rad) = 0;
 
+    // Ports::D1..D4, written into out[0..3]. Invalid beams are marked valid=false.
+    virtual void readDistances(DistanceReading (&out)[kDistanceChannels]) = 0;
+
     // --- Actuation (inverse kinematics + per-actuator safety) ---
     // Mix the chassis command down to actuators, apply hardware safety
     // (voltage clamp, current limit, stick-zero brake, battery scaling) and spin.
@@ -41,4 +44,15 @@ public:
     // --- Heading alignment for autonomous start ---
     // Offset the heading source so the current raw heading reads as target_rad.
     virtual void alignHeadingTo(double target_rad) = 0;
+
+    // End of a control tick. Hardware drives leave this empty. The simulation
+    // advances its plant by dt seconds and redraws display_pose (the estimator).
+    // particles may be a sample of the localizer's hypotheses; count 0 draws none.
+    virtual void service(double dt, const Pose2d& display_pose,
+                         const Pose2d* particles = nullptr, int particle_count = 0) {
+        (void)dt;
+        (void)display_pose;
+        (void)particles;
+        (void)particle_count;
+    }
 };
