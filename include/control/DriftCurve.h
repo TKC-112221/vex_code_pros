@@ -61,6 +61,7 @@
  *   nav.target.max_accel = 1.5;          // optional, m/s^2; else config.path_accel
  *   nav.target.line_length = 0.3;        // meters of straight travel into the target
  *   nav.target.ignore_direction = true;  // straight at the point; keep exit_speed
+ *   nav.target.backwards = true;         // nose points opposite the direction of travel
  *   nav.reset();
  *   out.commands = CommandVector::fromChassis(nav.compute(estimate));
  *
@@ -96,7 +97,9 @@ struct DriftCurveConfig {
 // in m/s^2. Leave it unset to use config.path_accel. line_length is the
 // straight finish into the target, in meters. 0 fits the curve to the target.
 // ignore_direction drops exit_direction: the robot drives straight at the
-// point and only the exit speed is used.
+// point and only the exit speed is used. backwards drives in reverse: the
+// nose points opposite the direction of travel. config.forwards still
+// applies when backwards is false.
 struct DriftCurveTarget {
     double x = 0;
     double y = 0;
@@ -105,6 +108,7 @@ struct DriftCurveTarget {
     std::optional<double> max_accel;
     double line_length = 0.5;
     bool ignore_direction = false;
+    bool backwards = false;
 };
 
 class DriftCurve {

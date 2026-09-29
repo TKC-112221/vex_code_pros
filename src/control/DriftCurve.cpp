@@ -346,7 +346,8 @@ ChassisCommand DriftCurve::compute(const StateEstimate& state) {
     if (target.ignore_direction && dist > 1e-4) {
         approach = std::atan2(ty - ry, tx - rx);
     }
-    const double nose = config.forwards
+    const bool forwards = config.forwards && !target.backwards;
+    const double nose = forwards
         ? approach
         : mathutil::normalize_angle(approach + Robot::PI);
     const bool close = dist < config.close_m;
@@ -388,7 +389,7 @@ ChassisCommand DriftCurve::compute(const StateEstimate& state) {
     if (accel < 0.05) accel = 0.05;
     const double v_brake = std::sqrt(v_end * v_end + 2.0 * accel * length_m);
     const double v_ideal = (v_brake < v_max) ? v_brake : v_max;
-    const double v_now = (config.forwards ? 1.0 : -1.0) * state.v_lin;
+    const double v_now = (forwards ? 1.0 : -1.0) * state.v_lin;
     const double step = accel * System::DT_SEC;
     double v_plan = v_ideal;
     if (v_plan > v_now + step) v_plan = v_now + step;
@@ -405,7 +406,7 @@ ChassisCommand DriftCurve::compute(const StateEstimate& state) {
     }
 
     double psi = mathutil::normalize_angle(phi + sigma);
-    if (!config.forwards) psi = mathutil::normalize_angle(psi + Robot::PI);
+    if (!forwards) psi = mathutil::normalize_angle(psi + Robot::PI);
     // A prescribed finish heading. With ignore_direction the nose stays
     // where it is, and only the speed is driven to exit_speed.
     if (stop_settle && !target.ignore_direction) psi = nose;
@@ -418,7 +419,7 @@ ChassisCommand DriftCurve::compute(const StateEstimate& state) {
     const double small_deg = Boomerang::Angular.small_error;
     const double heading_to_goal_deg =
         mathutil::normalize_angle(nose - theta) * (180.0 / Robot::PI);
-    const double direction = config.forwards ? 1.0 : -1.0;
+    const double direction = forwards ? 1.0 : -1.0;
     const bool heading_ok = target.ignore_direction
         || std::fabs(heading_to_goal_deg) < small_deg;
     settled_ = (dist / kMetersPerInch) < small_in
