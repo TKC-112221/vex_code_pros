@@ -1,67 +1,80 @@
 #pragma once
 /* ---------------------------------------------------------------------------
- * LogFrame.h  --  The on-disk / in-memory recording schema.
+ * LogFrame.h  --  Unified on-disk / in-memory recording schema.
  *
- * Chassis-frame storage: command intent (surge/sway/yaw) and applied effort
- * (linear/lateral/angular). Drivebase-specific wheel mixes belong only inside
- * a concrete IDriveBase, never in the log.
+ * One frame type serves trajectory replay and system identification. Command
+ * intent (surge/sway/yaw) and applied effort (linear/lateral/angular) stay in
+ * the chassis frame. Drivebase-specific wheel mixes stay inside the concrete
+ * IDriveBase. The raw_* block adds the pre-filter sensor sample.
  *
- * The positional constructor still accepts the legacy 16-arg tank CSV shape
- * (joy_fwd, joy_turn, req_l, req_r) used by generated headers: it maps sticks
- * to surge/yaw and converts left/right volts into linear/angular (lateral=0).
+ * Pose is the estimator pose at the tick (replay path + start pose). Velocity
+ * channels used for replay are the denoised rates. The raw_* block is the
+ * pre-filter sample from the same tick: heading, wheel speed, travel, and
+ * the four distance beams. Encoder position, current, temperature, battery,
+ * and IMU accel / yaw rate above are already unfiltered.
  * ------------------------------------------------------------------------- */
 
 #include <cstdint>
 
 struct LogFrame {
     LogFrame() = default;
-    // Legacy positional constructor (matches v1 / generated data headers).
-    // jf/jt were shaped sticks; rlv/rrv were tank left/right volts.
-    LogFrame(double t, double x_, double y_, double th, double vr, double or_, double ar, double alr,
-             double jf, double jt, double rlv, double rrv, double lpd, double rpd, double bv, uint8_t sub)
-        : time(t), x(x_), y(y_), theta(th), v_ref(vr), omega_ref(or_), a_ref(ar), alpha_ref(alr),
-          cmd_surge(jf), cmd_sway(0.0), cmd_yaw(jt),
-          applied_linear((rlv + rrv) / 2.0),
-          applied_lateral(0.0),
-          applied_angular((rrv - rlv) / 2.0),
-          l_pos_deg(lpd), r_pos_deg(rpd), battery_voltage(bv), subsystems(sub) {}
 
     double time = 0;
+
+    // Estimator pose (field frame, inches). Replay path and start pose.
     double x = 0;
     double y = 0;
     double theta = 0;
-    double v_ref = 0;
-    double omega_ref = 0;
-    double a_ref = 0;
-    double alpha_ref = 0;
-    double lin_error = 0;
-    double ang_error = 0;
-    double pid_lin_out = 0;
-    double pid_ang_out = 0;
-    double actual_x = 0;
-    double actual_y = 0;
-    double actual_theta = 0;
 
-    // Pre-actuation command vector (chassis frame).
+    // Denoised chassis rates this tick (replay velocity reference).
+    double v_lin = 0;   // m/s
+    double v_ang = 0;   // rad/s
+
+    // Inertial chassis velocity from accelerometer integration (slip-aware).
+    double v_inertial_fwd = 0;  // m/s, body forward
+    double v_inertial_lat = 0;  // m/s, body left
+
+    // Pre-actuation command (chassis frame, before drivebase safety).
     double cmd_surge = 0;
     double cmd_sway  = 0;
     double cmd_yaw   = 0;
 
-    // Post-safety applied chassis effort (what replay should feed forward).
+    // Post-safety applied effort (plant input; replay feedforward).
     double applied_linear  = 0;
     double applied_lateral = 0;
     double applied_angular = 0;
 
+    // Raw wheel-bank encoder positions (deg). Differentiate offline for speed.
     double l_pos_deg = 0;
     double r_pos_deg = 0;
-    double l_vel_rpm = 0;
-    double r_vel_rpm = 0;
+
+    // Motor electrical + thermal (bank averages on multi-motor chassis).
     double l_current_amps = 0;
     double r_current_amps = 0;
+    double l_temp_c = 0;
+    double r_temp_c = 0;
+
     double battery_voltage = 0;
+
+    // Raw IMU specific force (G) and yaw rate (deg/s), unfiltered.
     double imu_accel_x = 0;
     double imu_accel_y = 0;
-    double imu_heading = 0;
-    double imu_rate_z = 0;
+    double imu_rate_z  = 0;
+
     uint8_t subsystems = 0;
+
+    // Pre-denoiser chassis sample. v_lin / v_ang above stay the filtered
+    // rates replay follows; these keep the sensor bandwidth.
+    double raw_heading_rad = 0;
+    double raw_v_lin = 0;          // m/s
+    double raw_v_ang = 0;          // rad/s
+    double raw_l_vel_rpm = 0;
+    double raw_r_vel_rpm = 0;
+    double raw_fwd_m = 0;          // wheel travel this tick, meters
+    double raw_strafe_m = 0;
+
+    // Distance beams D1..D4 before range smoothing. 0 m when invalid.
+    double raw_range_m[4] = {};
+    uint8_t raw_range_conf[4] = {};  // 0..63
+    uint8_t raw_range_valid = 0;     // bit i set when D(i+1) returned
 };

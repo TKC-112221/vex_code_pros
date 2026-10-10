@@ -1,0 +1,349 @@
+$srcs = @('src\main.cpp') + (Get-ChildItem src\auton\*.cpp, src\control\*.cpp, src\estimators\*.cpp, src\logic\*.cpp, src\math\*.cpp, src\trajectory\*.cpp, src\platform\*.cpp, src\host\*.cpp).FullName; clang++ --std=gnu++26 -I./include -D_POSIX_THREADS -D_UNIX98_THREAD_MUTEX_ATTRIBUTES -D_POSIX_TIMERS -D_POSIX_MONOTONIC_CLOCK -D_USE_MATH_DEFINES -D_PROS_KERNEL_SUPPRESS_LLEMU_WARNING -DROBOT_HOST=1 -g -Os @srcs -luser32 -lgdi32 -o simulation_bin.exe
+$srcs = @('src\main.cpp') + (Get-ChildItem src\auton\*.cpp, src\control\*.cpp, src\estimators\*.cpp, src\logic\*.cpp, src\math\*.cpp, src\trajectory\*.cpp, src\platform\*.cpp, src\host\*.cpp).FullName; C:\Users\studentuser\Documents\cpp\mingw64\bin\clang++.exe --std=gnu++26 -I./include -D_POSIX_THREADS -D_UNIX98_THREAD_MUTEX_ATTRIBUTES -D_POSIX_TIMERS -D_POSIX_MONOTONIC_CLOCK -D_USE_MATH_DEFINES -D_PROS_KERNEL_SUPPRESS_LLEMU_WARNING -DROBOT_HOST=1 -g -Os @srcs -o simulation_bin.exe -luser32 -lgdi32 "-Wl,--allow-multiple-definition" "-Wl,-Bstatic" -lstdc++ -lgcc -lgcc_eh -lwinpthread -lpthread -static
+
+py -3 python/build_plant.py
+py -3 python/optimize_tuning.py --log path\to\skills_auto.bin
+
+Moving from rigid trajectory playback to a dynamic checkpoint and action queue is a major architectural upgrade. To achieve this in C++ for a VEX V5 brain, you need a non-blocking **Command Scheduler** architecture.
+
+Because you want to mix continuous movements (driving to X,Y) with discrete actions (running an intake, waiting, firing a pneumatic), your data structure must handle fundamentally different types of data and execution states.
+
+Here are the three most effective data structures for this in VEX C++, ranging from simplest to most robust.
+
+### 1. The Command Pattern (Polymorphic Queue) — *Highly Recommended*
+
+This is the standard architecture used in advanced FRC and VEX teams (similar to WPILib's Command-Based framework). You create a base `Command` class, and every specific action (Move, Turn, Intake, Wait) inherits from it.
+
+You store these in a `std::queue<std::unique_ptr<Command>>`.
+
+**Why it works:** It cleanly separates the logic of *how* to do something from the queue itself. Every command tracks its own completion state, allowing your main autonomous loop to run non-blocking odometry and PID updates in the background.
+
+```cpp
+#include <queue>
+#include <memory>
+
+// Base Interface
+class Command {
+public:
+    virtual ~Command() = default;
+    virtual void initialize() {}       // Runs once when command starts
+    virtual bool execute() = 0;        // Runs every 10ms loop. Returns true when finished.
+    virtual void end() {}              // Runs once when finished
+};
+
+// Example: Driving to a Point
+class DriveToPoint : public Command {
+private:
+    double targetX, targetY;
+public:
+    DriveToPoint(double x, double y) : targetX(x), targetY(y) {}
+
+    void initialize() override {
+        // Setup PID targets, etc.
+    }
+
+    bool execute() override {
+        // Calculate error, update motors
+        double error = calculateDistanceTo(targetX, targetY);
+        if (error < 1.0) return true; // Reached target
+        return false; // Still driving
+    }
+    
+    void end() override {
+        // Stop drive motors
+    }
+};
+
+// Example: Running an Action
+class RunIntake : public Command {
+private:
+    int timeMs;
+    int startTime;
+public:
+    RunIntake(int ms) : timeMs(ms) {}
+    
+    void initialize() override {
+        startTime = pros::millis(); // or vex::timer::system()
+        // intakeMotor.move(127);
+    }
+    
+    bool execute() override {
+        return (pros::millis() - startTime) >= timeMs;
+    }
+    
+    void end() override {
+        // intakeMotor.move(0);
+    }
+};
+
+```
+
+**Execution:** Your autonomous routine builds the queue: `commandQueue.push(std::make_unique<DriveToPoint>(24, 48));`. A background task checks the queue, calls `execute()` on the front command, and pops it off when it returns `true`.
+
+### 2. The Tagged Union (Struct with Enum)
+
+If you want to avoid dynamic memory allocation (`std::unique_ptr`) or keep all your path data in one massive array, use a struct with an `enum` to define its type.
+
+**Why it works:** It stores perfectly in a contiguous `std::vector<Checkpoint>`. This is great if you want to visually preview the path on the V5 Brain screen, because you can iterate through the vector and extract all the X/Y coordinates easily.
+
+```cpp
+#include <vector>
+
+enum class ActionType {
+    DRIVE_TO,
+    TURN_TO,
+    INTAKE_ON,
+    SHOOT,
+    WAIT
+};
+
+struct Checkpoint {
+    ActionType type;
+    
+    // Movement parameters
+    double x = 0.0;
+    double y = 0.0;
+    double heading = 0.0;
+    
+    // Action parameters
+    double timeout = 0.0;
+    int motorPower = 0;
+};
+
+// Building the routine:
+std::vector<Checkpoint> autonRoutine = {
+    {ActionType::DRIVE_TO, 24.0, 48.0, 0.0, 5000, 0},
+    {ActionType::TURN_TO, 24.0, 48.0, 90.0, 2000, 0},
+    {ActionType::SHOOT, 0.0, 0.0, 0.0, 1000, 127},
+    {ActionType::DRIVE_TO, 48.0, 48.0, 90.0, 5000, 0}
+};
+
+```
+
+**Execution:** Your main loop uses a massive `switch(currentCheckpoint.type)` statement. The downside is that this `switch` statement can become massive and difficult to maintain as you add more complex actions.
+
+### 3. Lambda Callback Queue (`std::function`)
+
+If you want maximum flexibility with minimal boilerplate, you can store arbitrary blocks of code in a queue using C++ lambda functions.
+
+**Why it works:** You don't have to define a new class or enum type for every new action. You just write the logic inline.
+
+```cpp
+#include <queue>
+#include <functional>
+
+// A queue of functions that return boolean (true when finished)
+std::queue<std::function<bool()>> routine;
+
+void buildAuton() {
+    // 1. Move to point (assuming a global moveTo function that returns true when done)
+    routine.push([]() {
+        return moveTo(24, 48); 
+    });
+
+    // 2. Wait 500ms
+    routine.push([]() {
+        static int start = pros::millis();
+        return (pros::millis() - start) > 500;
+    });
+
+    // 3. Fire pneumatic once, immediately move to next command
+    routine.push([]() {
+        // clamp.set_value(true);
+        return true; 
+    });
+}
+
+```
+
+### Architecture Recommendation
+
+For a V5 robot, **Option 1 (The Command Pattern)** is the most scalable.
+
+To implement it smoothly, you should separate your code into two threads/tasks:
+
+1. **Odometry/Background Task:** Runs at a strict 10ms loop. It updates robot X/Y/Theta using tracking wheels, calculates PID for the drive base, and checks the `Command` queue to run `execute()` on the active command.
+2. **Main Autonomous Task:** Simply pushes objects into the queue.
+
+Option 1 does not directly inherit Option 3, as they represent different programming paradigms (Object-Oriented polymorphism vs. functional closures). However, you can seamlessly combine them by creating a generic Command class that wraps a lambda function.
+
+This combination gives you the ultimate hybrid: you keep the robust structure of the **Command Pattern** for complex, multi-loop actions (like driving with PID), but you use **Lambdas** to eliminate the boilerplate of writing entirely new classes for trivial, one-off actions (like firing a pneumatic or starting an intake).
+
+Here is how you combine them by creating `InstantCommand` and `RunCommand` wrappers.
+
+### The Hybrid Implementation
+
+```cpp
+#include <queue>
+#include <memory>
+#include <functional>
+
+// 1. The Base Command Interface (From Option 1)
+class Command {
+public:
+    virtual ~Command() = default;
+    virtual void initialize() {}
+    virtual bool execute() = 0; 
+    virtual void end() {}
+};
+
+// 2. The Lambda Wrapper for Instant Actions (Combined)
+// Useful for things that happen in a single tick (solenoids, toggles)
+class InstantCommand : public Command {
+private:
+    std::function<void()> action;
+public:
+    InstantCommand(std::function<void()> act) : action(act) {}
+
+    bool execute() override {
+        action();     // Run the lambda
+        return true;  // Immediately tell the queue this command is done
+    }
+};
+
+// 3. The Lambda Wrapper for Continuous Actions (Combined)
+// Useful for custom wait conditions or inline loops
+class RunCommand : public Command {
+private:
+    std::function<bool()> action;
+public:
+    RunCommand(std::function<bool()> act) : action(act) {}
+
+    bool execute() override {
+        return action(); // The queue will keep calling this until it returns true
+    }
+};
+
+// 4. A Standard Class for Complex Logic (From Option 1)
+class DriveToPoint : public Command {
+    // Full PID and odometry logic goes here
+    // ...
+};
+
+```
+
+### Building the Autonomous Routine
+
+Now, your autonomous routine can mix heavyweight classes and lightweight lambdas in the exact same queue.
+
+```cpp
+std::queue<std::unique_ptr<Command>> autonQueue;
+
+void buildAuton() {
+    // Use a dedicated class for complex continuous movement
+    autonQueue.push(std::make_unique<DriveToPoint>(24, 48));
+
+    // Combine with an InstantCommand lambda to fire a pneumatic
+    autonQueue.push(std::make_unique<InstantCommand>([]() {
+        // clamp.set_value(true);
+    }));
+
+    // Combine with a RunCommand lambda for a custom wait condition
+    autonQueue.push(std::make_unique<RunCommand>([]() {
+        static int start = pros::millis();
+        return (pros::millis() - start) > 500; // Returns true after 500ms
+    }));
+
+    // Back to a dedicated class
+    autonQueue.push(std::make_unique<DriveToPoint>(48, 48));
+}
+
+```
+
+### Why This is the Best Approach
+
+* **Zero Boilerplate:** You don't need to write a 20-line class file just to turn on a single motor or wait for a sensor threshold.
+* **Scope Access:** Lambdas can capture local variables in your autonomous setup (using `[&]`), giving you extreme flexibility to read sensors or check variables on the fly.
+* **Uniform Queue:** Your background task remains incredibly simple. It doesn't care if the command is a massive 200-line PID drive class or a 3-line lambda; it just calls `execute()` until it returns `true`.
+
+
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 632      |
+|    ep_rew_mean     | -10.8    |
+| time/              |          |
+|    episodes        | 3924     |
+|    fps             | 156      |
+|    time_elapsed    | 17563    |
+|    total_timesteps | 2756347  |
+| train/             |          |
+|    actor_loss      | 2.06     |
+|    critic_loss     | 0.0123   |
+|    ent_coef        | 0.00237  |
+|    ent_coef_loss   | -3.49    |
+|    learning_rate   | 0.0003   |
+|    n_updates       | 2755346  |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 624      |
+|    ep_rew_mean     | -10.8    |
+| time/              |          |
+|    episodes        | 3928     |
+|    fps             | 156      |
+|    time_elapsed    | 17574    |
+|    total_timesteps | 2758117  |
+| train/             |          |
+|    actor_loss      | 2.15     |
+|    critic_loss     | 0.0149   |
+|    ent_coef        | 0.00234  |
+|    ent_coef_loss   | 1.46     |
+|    learning_rate   | 0.0003   |
+|    n_updates       | 2757116  |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 601      |
+|    ep_rew_mean     | -10.7    |
+| time/              |          |
+|    episodes        | 3932     |
+|    fps             | 156      |
+|    time_elapsed    | 17580    |
+|    total_timesteps | 2759030  |
+| train/             |          |
+|    actor_loss      | 2.43     |
+|    critic_loss     | 0.267    |
+|    ent_coef        | 0.0023   |
+|    ent_coef_loss   | 2.37     |
+|    learning_rate   | 0.0003   |
+|    n_updates       | 2758029  |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 601      |
+|    ep_rew_mean     | -10.6    |
+| time/              |          |
+|    episodes        | 3936     |
+|    fps             | 156      |
+|    time_elapsed    | 17601    |
+|    total_timesteps | 2762230  |
+| train/             |          |
+|    actor_loss      | 2.38     |
+|    critic_loss     | 0.00986  |
+|    ent_coef        | 0.00228  |
+|    ent_coef_loss   | -1.01    |
+|    learning_rate   | 0.0003   |
+|    n_updates       | 2761229  |
+---------------------------------
+---------------------------------
+| rollout/           |          |
+|    ep_len_mean     | 616      |
+|    ep_rew_mean     | -10.7    |
+| time/              |          |
+|    episodes        | 3940     |
+|    fps             | 156      |
+|    time_elapsed    | 17617    |
+|    total_timesteps | 2764793  |
+| train/             |          |
+|    actor_loss      | 2.3      |
+|    critic_loss     | 0.0105   |
+|    ent_coef        | 0.002    |
+|    ent_coef_loss   | 0.232    |
+|    learning_rate   | 0.0003   |
+|    n_updates       | 2763792  |
+---------------------------------
+
+uv run python build_plant.py
+uv run python train_drive_policy.py --steps = 200000
+uv run python view_policy.py --save rollout/004.png

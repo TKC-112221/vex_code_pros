@@ -1,0 +1,83 @@
+// Written by python/optimize_tuning.py. Copy each assignment over the
+// matching line. Do not append this file to a header.
+//
+// KV_LIN, KA_LIN, KV_ANG, and KA_ANG are formulas in Tuning.h. They
+// update when the knobs below change. With these knobs they evaluate to
+//   KV_LIN 1.7853517   KA_LIN 3.0235593
+//   KV_ANG 1.064792   KA_ANG 0.023800144
+//
+// Physics::TURN_RADIUS_MAX_M aliases data/generated_limits.h when that
+// header is on the include path. Replace the alias with the literal
+// below, in both branches, or edit generated_limits.h. Editing only the
+// #else fallback does nothing while the generated header exists.
+//
+// Boomerang::CLOSE_IN is also DrivePolicy::kPositionToleranceIn.
+//
+// Stage 1 fit resistance against logged motor current.
+// Stage 1 cost 0.0427335.
+// Stage 2 feedforward cost 0.0188003.
+// Stage 2 motion cost 0.0145625.
+// Stage 2 drift cost 0.0138225.
+// Stage 2 heading cost 0.0138225.
+// Stage 2 lateral cost 0.0133856.
+// Stage 2 geometry cost 0.0133856.
+
+// include/hardware/MockDriveParams.h
+constexpr double VELOCITY_TAU_SEC = 0.16438084;
+constexpr double SKID_TAU_SEC = 0.34077019;
+constexpr double SIDE_RESISTANCE_OHM = 1.8272741;
+constexpr double SPEED_SCALE = 1.008893;
+
+// include/core/Tuning.h  namespace Feedforward
+constexpr double KS_LIN = 0.77176669;
+constexpr double KS_ANG = 0.12287921;
+constexpr double LIN_SPEED_AT_SAT = 6.2890875;
+constexpr double LIN_ACCEL_AT_FULL_V = 3.9688323;
+constexpr double ANG_RATE_PER_VOLT = 5.0316095;
+constexpr double ANG_LEVER_M = 0.42324113;
+constexpr double ANG_KA_COEFF = 0.43963087;
+constexpr double ANG_KA_LENGTH_M = 0.068738576;
+
+// include/core/Tuning.h  namespace Drift
+constexpr double PATH_ACCEL = 3.820523;
+constexpr double K_SLIP = 3.277637;
+constexpr double A_MAX = 6.3656204;
+constexpr double MAX_SLIP_RAD = 1.3634665;
+constexpr double LAT_KP = 11.28316;
+constexpr double LAT_KI = 8.5606862e-05;
+constexpr double LAT_KD = 1.4805715;
+constexpr double LAT_KD2 = 0.23161883;
+constexpr double LAT_I_LIMIT = 1.7840793;
+
+// include/core/Tuning.h  namespace Motion
+constexpr double MIN_ACCEL_MPS2 = 0.10019685;
+constexpr double KAPPA_EPS = 0.001;
+
+// include/core/Tuning.h  namespace Practice
+constexpr double MAX_ACCEL_MPS2 = 3.5729121;
+
+// include/core/Tuning.h  namespace Physics  (see the generated-limits note)
+constexpr double TURN_RADIUS_MAX_M = 10.0;
+
+// include/core/Tuning.h  namespace Boomerang
+constexpr Axis Lateral = {10.0, 0.0, 3.0, 3.0, 1.0, 100.0, 3.0, 500.0, 5.0};
+constexpr Axis Angular = {1.0, 0.0, 0.0, 3.0, 1.0, 100.0, 3.0, 500.0, 0.0};
+constexpr double CLOSE_IN = 10.60841;
+
+// Held. These stay at the compiled values. The rollout below does not
+// read them, so a search would only decorate the paste.
+// PidGains, Ramsete, FF_BOOST, SPATIAL_WARP: CascadedController replay, not DriftGuide.
+// Tuning slew/cube/turn stick, Face, Pivot, Replay wheel KP, Controls deadbands: teleop.
+// Drift::EXP_RATE: Exponential curves only. DriftFollower's shape is Hermite.
+// Drift::DRIFT_ACCEL: the atan slip model. DriftFollower uses arcsin (A_MAX).
+// Drift::PATH_ACCEL is searched. It applies when the target leaves max_accel unset.
+// Practice::MAX_ACCEL_MPS2 is searched. DriftGuide writes it onto the target.
+// SETTLE_SPEED, SETTLE_IN, SETTLE_DEG: they only raise the settled flag.
+// Boomerang Lateral PID, slew, and timing: DriftFollower's lateral loop is Drift::LAT_*.
+// BOOMERANG_LEAD, BOOMERANG_MAX_SLIP, PROBE_M, CARROT_FLOOR, CURVE_STEPS: other types.
+// driftpath lookahead and graph limits: DriftCurve, not this follower.
+// DrivePolicy scales: they belong to the trained network, which this search does not run.
+// Particles, Slip, RangeLik, Ekf, ImuBias, SensorFilter, WallSolve, WallNudge: estimators.
+// The guide is scored on ground-truth pose, so estimator gains have no effect here.
+// ANG_KA_MOTOR_COUNT is the motor count from the fit, not a gain.
+// MockDrive confidence, range period, and reported temperature do not move the chassis.

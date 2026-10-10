@@ -11,7 +11,7 @@
 
 #include "interfaces/IMotionLimiter.h"
 #include "core/Specs.h"
-#include "core/Limits.h"
+#include "core/Tuning.h"
 
 class StaticMotionLimiter : public IMotionLimiter {
 public:

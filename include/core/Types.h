@@ -13,13 +13,57 @@
 #include <cstdint>
 
 // ---- Operating modes -------------------------------------------------------
-enum class RobotMode { IDLE, RECORDING, REPLAYING, SYSID_DRIVE };
+// COMMAND runs the declarative routine in auton/ on this same 10 ms tick.
+enum class RobotMode { IDLE, RECORDING, REPLAYING, COMMAND };
+
+// Published field position is inches. Wheel travel, distance ranges, and the
+// estimator's internal geometry stay in meters and are converted at the
+// IEstimator boundary. Speeds stay m/s and accelerations stay m/s^2.
+constexpr double kMetersPerInch = 0.0254;
+constexpr double kInchesPerMeter = 1.0 / kMetersPerInch;
 
 // ---- Geometry --------------------------------------------------------------
+// Position only. Path samples, particles, and logs use this.
 struct Pose2d {
-    double x = 0;      // meters, field frame
-    double y = 0;      // meters, field frame
-    double theta = 0;  // radians, field frame
+    double x = 0;      // inches, field frame
+    double y = 0;      // inches, field frame
+    double theta = 0;  // radians, field frame. 0 = +X, CCW positive
+};
+
+inline double metersToInches(double meters) { return meters * kInchesPerMeter; }
+inline double inchesToMeters(double inches) { return inches * kMetersPerInch; }
+
+inline Pose2d poseMetersToInches(const Pose2d& meters) {
+    return Pose2d{metersToInches(meters.x), metersToInches(meters.y), meters.theta};
+}
+inline Pose2d poseInchesToMeters(const Pose2d& inches) {
+    return Pose2d{inchesToMeters(inches.x), inchesToMeters(inches.y), inches.theta};
+}
+
+// Pose plus the velocity at that pose. This is the setpoint autonomous
+// routines and the driver-control curve override both hand to the follower.
+// x and y are inches. heading is the direction the nose faces. v is m/s
+// along the nose; negative v drives in reverse. omega is yaw rate, rad/s,
+// CCW. A measured StateEstimate becomes one of these through motionPoseOf().
+struct MotionPose {
+    double x = 0;
+    double y = 0;
+    double heading = 0;
+    double v = 0;
+    double omega = 0;
+
+    Pose2d geometry() const { return Pose2d{x, y, heading}; }
+};
+
+// Extra limits for a MotionPose drive. max_accel_mps2 < 0 keeps the
+// follower's own acceleration. handoff_in > 0 ends the drive that far from
+// the pose while v is still non-zero. Lengths are inches, same as Pose2d.
+// The line-length default is the old 0.5 m finish.
+struct PathConstraints {
+    double max_accel_mps2 = -1.0;
+    double line_length_in = 0.5 * kInchesPerMeter;
+    bool ignore_heading = false;
+    double handoff_in = 0.0;
 };
 
 // A chassis-frame velocity/effort vector.
@@ -47,6 +91,11 @@ struct StateEstimate {
     double deriv_lin = 0;  // (a_cmd_est - a_act_est) for the velocity PID D-term
     double deriv_ang = 0;
 };
+
+// v is body-forward speed (v_lin). omega is yaw rate (v_ang).
+inline MotionPose motionPoseOf(const StateEstimate& state) {
+    return MotionPose{state.pose.x, state.pose.y, state.pose.theta, state.v_lin, state.v_ang};
+}
 
 // ---- Motion setpoint fed to a controller -----------------------------------
 // The universal target: where we want to be (pose), how fast (velocity twist),
@@ -96,6 +145,8 @@ struct CommandVector {
 };
 
 // ---- Subsystem (non-drive) output ------------------------------------------
+// Volts the drivebase applies. Produced from a SubsystemIntent, or, on the
+// replay path, from a recorded button bitmask.
 struct SubsystemCommand {
     int  intake_pct = 0;
     int  roller_top_pct = 0;
@@ -103,6 +154,50 @@ struct SubsystemCommand {
     bool pneumatics_g_state = false;
     bool pneumatics_b_state = false;
     uint8_t raw_bitmask = 0;   // exact requested button state (for logging/replay)
+};
+
+// Shared mechanism mode. Autonomous commands and the driver macros both
+// store this. toCommand() is the one percent table.
+enum class IntakeState { Idle, In, Out, Jammed };
+enum class ShooterState { Idle, Spin, Reverse };
+
+struct SubsystemIntent {
+    IntakeState intake = IntakeState::Idle;
+    ShooterState shooter = ShooterState::Idle;
+    bool pneumatic_g = false;
+    bool pneumatic_b = false;
+
+    // Solo intake matches a driver holding only R1 or R2, including the
+    // small roller nudge from that button mix. Shooter matches L1 / L2.
+    // Jammed and Idle contribute no motor voltage.
+    SubsystemCommand toCommand() const {
+        SubsystemCommand out;
+        switch (intake) {
+            case IntakeState::In:  out.intake_pct = 100;  break;
+            case IntakeState::Out: out.intake_pct = -100; break;
+            case IntakeState::Idle:
+            case IntakeState::Jammed: break;
+        }
+        switch (shooter) {
+            case ShooterState::Spin:
+                out.roller_top_pct = 106;
+                out.roller_bottom_pct = 97;
+                break;
+            case ShooterState::Reverse:
+                out.roller_top_pct = -24;
+                out.roller_bottom_pct = -103;
+                break;
+            case ShooterState::Idle: break;
+        }
+        if (shooter == ShooterState::Idle
+            && (intake == IntakeState::In || intake == IntakeState::Out)) {
+            out.roller_top_pct = -4;
+            out.roller_bottom_pct = 2;
+        }
+        out.pneumatics_g_state = pneumatic_g;
+        out.pneumatics_b_state = pneumatic_b;
+        return out;
+    }
 };
 
 // ---- Raw human input -------------------------------------------------------
@@ -131,12 +226,20 @@ struct ChassisObservation {
     double v_lin = 0;           // measured forward velocity (m/s)
     double v_ang = 0;           // measured angular velocity (rad/s)
     double battery_voltage = 0;
-    // Extra channels retained purely so recordings match v1's log schema.
+
+    // Wheel-bank channels (drivebase maps its geometry into left/right).
     double left_pos_deg = 0,  right_pos_deg = 0;
-    double left_vel_rpm = 0,  right_vel_rpm = 0;
+    double left_vel_rpm = 0,  right_vel_rpm = 0;   // logged raw on LogFrame
     double left_current_amps = 0, right_current_amps = 0;
+    double left_temp_c = 0, right_temp_c = 0;
+
+    // Raw IMU (G, deg/s). Unfiltered so recordings keep the sensor bandwidth.
     double imu_accel_x = 0, imu_accel_y = 0;
-    double imu_heading_deg = 0, imu_rate_z_dps = 0;
+    double imu_rate_z_dps = 0;
+
+    // Filled by ImuLinearDelta after each accel integration step.
+    double v_inertial_fwd = 0;  // m/s, body forward
+    double v_inertial_lat = 0;  // m/s, body left
 };
 
 // One VEX distance-sensor sample. Invalid readings (no return, out of range,
@@ -167,8 +270,12 @@ struct SensorDict {
 
 // Unified sense package produced once per control tick. Every downstream stage
 // consumes this structure (or a slice of it) rather than re-reading hardware.
+// `sensors` is denoised. `raw` is the same tick before the denoiser, kept so
+// recording can store the sensor bandwidth without reading hardware twice
+// (a second read would consume the encoder deltas).
 struct RobotReading {
     SensorDict   sensors{};
+    SensorDict   raw{};
     JoystickData joystick{};
     ButtonState  buttons{};
 };

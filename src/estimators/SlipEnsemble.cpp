@@ -1,6 +1,7 @@
 /* SlipEnsemble.cpp -- fixed slip hypotheses, nudged by wall ranges. */
 #include "estimators/SlipEnsemble.h"
 #include "core/Specs.h"
+#include "core/Tuning.h"
 #include "math/MathUtils.h"
 #include "math/WallRange.h"
 #include <cmath>
@@ -10,12 +11,10 @@ namespace {
 constexpr double kTwoPi = 6.283185307179586;
 // -0.5 * (5 sigma)^2. Matches the particle filter's per-beam floor so a
 // blocked return cannot wipe a particle out of the weighted mean.
-constexpr double kMaxPenalty = -12.5;
-// A fix farther than this from every particle moves the whole cloud.
-constexpr double kKidnapSigmas = 4.0;
-// d(range)/d(x,y) steeper than this is a grazing ray. Leave it out of the step.
-constexpr double kMaxGradSq = 16.0;
-constexpr double kMaxHTheta = 3.0;
+constexpr double kMaxPenalty = RangeLik::MAX_PENALTY;
+constexpr double kKidnapSigmas = RangeLik::KIDNAP_SIGMAS;
+constexpr double kMaxGradSq = Slip::MAX_GRAD_SQ;
+constexpr double kMaxHTheta = Slip::MAX_H_THETA;
 
 // Kronecker bases so `count` particles fill the slip box instead of clumping.
 constexpr double kAlpha[6] = {
@@ -94,7 +93,7 @@ double unitInterval(int index, int axis, double shift) {
 SlipEnsemble::SlipEnsemble() : SlipEnsemble(SlipEnsembleConfig{}) {}
 
 SlipEnsemble::SlipEnsemble(const SlipEnsembleConfig& cfg) : cfg_(cfg) {
-    if (cfg_.count < 8) cfg_.count = 8;
+    if (cfg_.count < Slip::MIN) cfg_.count = Slip::MIN;
     if (cfg_.count > kMaxParticles) cfg_.count = kMaxParticles;
     if (cfg_.noise_scale_min < 0.0) cfg_.noise_scale_min = 0.0;
     if (cfg_.noise_scale_max < cfg_.noise_scale_min) cfg_.noise_scale_max = cfg_.noise_scale_min;
@@ -371,7 +370,7 @@ void SlipEnsemble::correctPose(const Pose2d& pose, double sigma_xy_m, double sig
 
     double gain = 1.0;
     if (!kidnap && sigma_xy_m > 0.0) {
-        gain = mathutil::clamp_val(0.08 / sigma_xy_m, 0.2, 1.0);
+        gain = mathutil::clamp_val(Slip::FIX_GAIN_NUM / sigma_xy_m, Slip::FIX_GAIN_MIN, 1.0);
     }
 
     for (int i = 0; i < cfg_.count; ++i) {

@@ -14,8 +14,7 @@
 #include "config/Ports.h"
 #include "config/Settings.h"
 #include "core/Specs.h"
-#include "core/Gains.h"
-#include "core/Limits.h"
+#include "core/Tuning.h"
 #include "math/MathUtils.h"
 #include <algorithm>
 #include <cmath>
@@ -64,12 +63,21 @@ void TankDrive::initialize() {
     right_drive->set_brake_mode(pros::MotorBrake::coast);
 }
 
-void TankDrive::calibrateSensors() {
+void TankDrive::beginSensorCalibration() {
     imu_offset_ = 0.0;
-    if (!Settings::ControlToggles::IMU_FALLBACK) {
-        imu->reset();
-        while (imu->is_calibrating()) pros::delay(10);
-    }
+}
+
+void TankDrive::waitSensorCalibration() {
+    if (Settings::ControlToggles::IMU_FALLBACK) return;
+    // Blocking reset. The kernel gives up after 3 s, and it never polls
+    // is_calibrating(), which stays true on an error status and froze
+    // initialize() the moment the startup clip returned.
+    imu->reset(true);
+}
+
+void TankDrive::calibrateSensors() {
+    beginSensorCalibration();
+    waitSensorCalibration();
 }
 
 void TankDrive::stop() {
@@ -79,10 +87,10 @@ void TankDrive::stop() {
 
 JoystickData TankDrive::readJoystick() {
     JoystickData joy;
-    joy.left_y  =  pilot->get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y)  / 127.0;
-    joy.left_x  =  pilot->get_analog(pros::E_CONTROLLER_ANALOG_LEFT_X)  / 127.0;
-    joy.right_y =  pilot->get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_Y) / 127.0;
-    joy.right_x =  pilot->get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_X) / 127.0;
+    joy.left_y  =  pilot->get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y)  / Controller::FULL_SCALE;
+    joy.left_x  =  pilot->get_analog(pros::E_CONTROLLER_ANALOG_LEFT_X)  / Controller::FULL_SCALE;
+    joy.right_y =  pilot->get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_Y) / Controller::FULL_SCALE;
+    joy.right_x =  pilot->get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_X) / Controller::FULL_SCALE;
     return joy;
 }
 
@@ -121,31 +129,41 @@ ChassisObservation TankDrive::readObservation(double prev_heading_rad) {
     prev_l_ = cl; prev_r_ = cr;
     o.forward_delta = (delta_l + delta_r) / 2.0;
 
-    double l_vel = left_drive->get_actual_velocity();
-    double r_vel = right_drive->get_actual_velocity();
-    o.v_lin = (l_vel + r_vel) / 2.0 * Robot::RPM_TO_MPS;
+    //double l_vel = left_drive->get_actual_velocity();
+    //double r_vel = right_drive->get_actual_velocity();
+    //o.v_lin = (l_vel + r_vel) / 2.0 * Robot::RPM_TO_MPS;
+    double l_vel = delta_l / System::DT_SEC;
+    double r_vel = delta_r / System::DT_SEC;
+    o.v_lin = o.forward_delta / System::DT_SEC * Robot::RPM_TO_MPS;
+
 
     if (CT::IMU_FALLBACK) {
         o.heading_rad = prev_heading_rad + (delta_r - delta_l) / Robot::Chassis::TRACK_WIDTH_M;
         o.v_ang = (r_vel - l_vel) * Robot::RPM_TO_MPS / Robot::Chassis::TRACK_WIDTH_M;
-        o.imu_heading_deg = prev_heading_rad * (180.0 / M_PI);
         o.imu_rate_z_dps  = -(r_vel - l_vel) * Robot::RPM_TO_MPS / Robot::Chassis::TRACK_WIDTH_M * (180.0 / M_PI);
         o.imu_accel_x = 0.0; o.imu_accel_y = 0.0;
     } else {
         o.heading_rad = -imu->get_rotation() * (M_PI / 180.0) + imu_offset_;
         o.v_ang = -imu->get_gyro_rate().z * (M_PI / 180.0);
-        o.imu_heading_deg = imu->get_rotation();
         o.imu_rate_z_dps  = imu->get_gyro_rate().z;
         o.imu_accel_x = imu->get_accel().x;
         o.imu_accel_y = imu->get_accel().y;
     }
 
-    // Log/record channels (kept to match v1's schema).
     o.left_pos_deg = left_drive->get_position();
     o.right_pos_deg = right_drive->get_position();
     o.left_vel_rpm = l_vel;  o.right_vel_rpm = r_vel;
     o.left_current_amps  = left_drive->get_current_draw()  / 1000.0;
     o.right_current_amps = right_drive->get_current_draw() / 1000.0;
+    {
+        const auto l_temps = left_drive->get_temperature_all();
+        const auto r_temps = right_drive->get_temperature_all();
+        double l_sum = 0.0, r_sum = 0.0;
+        for (double t : l_temps) l_sum += t;
+        for (double t : r_temps) r_sum += t;
+        o.left_temp_c  = l_temps.empty() ? 0.0 : l_sum / static_cast<double>(l_temps.size());
+        o.right_temp_c = r_temps.empty() ? 0.0 : r_sum / static_cast<double>(r_temps.size());
+    }
     o.battery_voltage = pros::battery::get_voltage() / 1000.0;
     return o;
 }
@@ -156,8 +174,8 @@ void TankDrive::readDistances(DistanceReading (&out)[kDistanceChannels]) {
 
 // Back-EMF current limit: clamp each side to its predicted EMF +/- max drop.
 void TankDrive::applyCurrentLimit(double& left_v, double& right_v, double v_lin, double v_ang) const {
-    double turn_r = (std::fabs(v_ang) < 0.01) ? Physics::TURN_RADIUS_MAX_M
-                  : std::min(std::fabs(v_lin) / (std::fabs(v_ang) + 0.01), Physics::TURN_RADIUS_MAX_M);
+    double turn_r = (std::fabs(v_ang) < Physics::OMEGA_EPS) ? Physics::TURN_RADIUS_MAX_M
+                  : std::min(std::fabs(v_lin) / (std::fabs(v_ang) + Physics::OMEGA_EPS), Physics::TURN_RADIUS_MAX_M);
     double v_avg_emf = feedforward_->linearVolts(v_lin, 0.0, std::fabs(v_lin), 0.0, v_ang, turn_r);
     double v_diff_emf = feedforward_->angularVolts(v_ang, 0.0, std::fabs(v_lin), 0.0, turn_r);
     double left_emf  = v_avg_emf - v_diff_emf / 2.0;
@@ -175,15 +193,14 @@ ChassisCommand TankDrive::applyDrive(const ChassisCommand& cmd, const ChassisObs
 
     // Stick-zero brake: gently oppose residual motion when the sticks are idle.
     if (CT::STICK_ZERO_BRAKE) {
-        double fwd  = pilot->get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y)  / 127.0;
-        double turn = -pilot->get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_X) / 127.0;
+        double fwd  = pilot->get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y)  / Controller::FULL_SCALE;
+        double turn = -pilot->get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_X) / Controller::FULL_SCALE;
         if (std::fabs(fwd) < Controls::STICK_ZERO_DEADBAND &&
             std::fabs(turn) < Controls::STICK_ZERO_DEADBAND) {
-            const double vel_eps = 0.02;
             double left_mps  = obs.left_vel_rpm  * Robot::RPM_TO_MPS;
             double right_mps = obs.right_vel_rpm * Robot::RPM_TO_MPS;
-            left_v  = (std::fabs(left_mps)  > vel_eps) ? (-sign(left_mps)  * Controls::TINY_BRAKE_VOLTAGE) : 0.0;
-            right_v = (std::fabs(right_mps) > vel_eps) ? (-sign(right_mps) * Controls::TINY_BRAKE_VOLTAGE) : 0.0;
+            left_v  = (std::fabs(left_mps)  > Controls::BRAKE_SPEED_MPS) ? (-sign(left_mps)  * Controls::TINY_BRAKE_VOLTAGE) : 0.0;
+            right_v = (std::fabs(right_mps) > Controls::BRAKE_SPEED_MPS) ? (-sign(right_mps) * Controls::TINY_BRAKE_VOLTAGE) : 0.0;
         }
     }
 
@@ -200,7 +217,7 @@ ChassisCommand TankDrive::applyDrive(const ChassisCommand& cmd, const ChassisObs
     double batt_scale = 1.0;
     if (use_battery_scaling) {
         double batt = pros::battery::get_voltage() / 1000.0;
-        batt_scale = (batt > 5.0) ? (System::MAX_VOLTS / batt) : 1.0;
+        batt_scale = (batt > Controls::BATTERY_VALID_V) ? (System::MAX_VOLTS / batt) : 1.0;
     }
 
     left_drive->move_voltage(voltsToMv(left_v * batt_scale));

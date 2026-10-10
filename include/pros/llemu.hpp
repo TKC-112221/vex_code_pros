@@ -75,9 +75,12 @@ namespace [[deprecated("Without liblvgl, LLEMU functions will not display anythi
      * these functions in the libvgl llemu headers.
      */
     extern __attribute__((weak)) bool is_initialized(void);
-#if defined(_MSC_VER)
+#if defined(ROBOT_HOST)
+    /* The field window paints LLEMU, so initialization succeeds on the host. */
+    inline bool initialize(void) { return true; }
+#elif defined(_MSC_VER)
     /* COFF lld-link does not merge GNU weak symbols. An inline body is COMDAT,
-       and it returns false so the host build can call this without a brain LCD. */
+       and it returns false so this call links without a brain LCD. */
     inline bool initialize(void) { return false; }
 #else
     extern __attribute__((weak)) bool initialize(void);

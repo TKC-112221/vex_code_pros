@@ -1,0 +1,7 @@
+gymnasium>=0.29
+stable-baselines3>=2.2
+torch
+numpy
+pybind11
+matplotlib
+cma>=3.3

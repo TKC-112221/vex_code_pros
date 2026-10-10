@@ -1,7 +1,7 @@
 /* ---------------------------------------------------------------------------
  * ProsKernel.cpp  --  desktop stand-in for the PROS kernel pieces the
- * pipeline actually calls: clock, delay, mutex, tasks, controller text,
- * and a brain LCD that reports "not present".
+ * pipeline actually calls: clock, delay, mutex, tasks, and controller
+ * text. Brain LLEMU text is stored for the field window.
  *
  * Linked only by the host build. The V5 image gets these from libpros.
  * clang++ on the MSVC target does not pass /subsystem to lld-link, so the
@@ -12,6 +12,8 @@
 #endif
 
 #include "api.h"
+#include "host/DeviceScreens.h"
+#include "host/FieldWindow.h"
 #include <chrono>
 #include <cstdarg>
 #include <cstdint>
@@ -31,12 +33,15 @@ extern "C" void delay(const std::uint32_t milliseconds) {
 }
 extern "C" std::int32_t controller_print(controller_id_e_t, std::uint8_t line, std::uint8_t col,
                                         const char* fmt, ...) {
-    std::printf("[ctrl %u:%u] ", (unsigned)line, (unsigned)col);
-    va_list args;
-    va_start(args, fmt);
-    std::vprintf(fmt, args);
-    va_end(args);
-    std::printf("\n");
+    char buf[96];
+    buf[0] = '\0';
+    if (fmt != nullptr) {
+        va_list args;
+        va_start(args, fmt);
+        std::vsnprintf(buf, sizeof(buf), fmt, args);
+        va_end(args);
+    }
+    devicescreens::writeController((int)line, (int)col, buf);
     return 1;
 }
 }  // namespace c
@@ -79,5 +84,7 @@ extern "C" void initialize(void);
 
 int main() {
     initialize();
-    for (;;) std::this_thread::sleep_for(std::chrono::hours(24));
+    // The clip pumps this window on this thread. Sleeping here is what made
+    // the window go unresponsive the moment the clip returned.
+    fieldwindow::run();
 }

@@ -16,15 +16,13 @@ public:
     void loadFromHeader() override;
     void saveToConsole() override;
 
-    void beginRecording(RobotMode mode, const Pose2d& startPose) override;
-    void recordFrame(const MotionTarget& target,
-                     const Pose2d& actual,
+    void beginRecording(const Pose2d& startPose) override;
+    void recordFrame(const Pose2d& pose,
                      const CommandVector& command,
                      const ChassisCommand& applied,
                      const SubsystemCommand& sub,
                      const ChassisObservation& obs,
-                     double lin_error,
-                     double ang_error) override;
+                     const SensorDict& raw) override;
     int getFrameCount() const override { return length_; }
 
     void resetPlayback() override;
@@ -37,7 +35,6 @@ public:
 private:
     std::array<LogFrame, System::MAX_RECORD_FRAMES> buffer_{};
     int length_ = 0;
-    RobotMode recording_mode_ = RobotMode::RECORDING;
 
     // Replay cursor + baselines
     float  replay_index_ = 0.0f;

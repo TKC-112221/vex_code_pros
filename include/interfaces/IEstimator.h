@@ -6,6 +6,10 @@
  * Ports::D1..D4 and is used only by estimators that can fuse a wall range
  * (KalmanEstimator, ParticleFilterEstimator, SlipEnsembleEstimator,
  * OdometryEstimator).
+ *
+ * getState(), overridePose(), sampleParticles(), and the optional absolute
+ * fixes use field inches. update() still takes chassis travel and ranges in
+ * meters; each filter keeps that geometry internally and converts here.
  * ------------------------------------------------------------------------- */
 
 #include "core/Types.h"
@@ -23,12 +27,12 @@ public:
     virtual void update(const SensorDict& sensors) = 0;
 
     // Optional absolute field fix (GPS, vision). Estimators that only
-    // dead-reckon ignore these. sigma is the 1-sigma accuracy of the fix.
-    virtual void observePosition(double /*x_m*/, double /*y_m*/, double /*sigma_m*/) {}
-    virtual void observePose(const Pose2d& /*pose*/, double /*sigma_xy_m*/,
+    // dead-reckon ignore these. x/y and sigma are inches, the published frame.
+    virtual void observePosition(double /*x_in*/, double /*y_in*/, double /*sigma_in*/) {}
+    virtual void observePose(const Pose2d& /*pose*/, double /*sigma_xy_in*/,
                              double /*sigma_theta_rad*/) {}
 
-    // Current best estimate (pose is authoritative; velocity is convenience).
+    // Current best estimate. Pose x/y are inches; velocity stays m/s and rad/s.
     virtual StateEstimate getState() const = 0;
 
     // Unwrapped heading accumulator, for display only.

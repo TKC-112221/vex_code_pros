@@ -39,12 +39,13 @@
 
 #include "core/Types.h"
 #include "core/Specs.h"
+#include "core/Tuning.h"
 
 struct DriftBoomerangConfig {
-    double lead = 1.0;                 // LemLib moveToPose lead, 0..1
-    double close_m = 7.5 * 0.0254;     // LemLib's hardcoded 7.5 inch settle
-    double drift_accel = 5.5;//9.81;         // m/s^2; tan(slip) = v^2 * kappa / this
-    double max_slip_rad = 0.7;         // clamp on the nose lead angle
+    double lead = Drift::BOOMERANG_LEAD;
+    double close_m = Boomerang::CLOSE_IN * kMetersPerInch;
+    double drift_accel = Drift::DRIFT_ACCEL;
+    double max_slip_rad = Drift::BOOMERANG_MAX_SLIP;
     bool   forwards = true;            // false reverses along the approach
     double max_volts = System::MAX_VOLTS;
 };

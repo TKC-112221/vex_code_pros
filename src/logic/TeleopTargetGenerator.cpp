@@ -1,13 +1,12 @@
 /* ---------------------------------------------------------------------------
  * TeleopTargetGenerator.cpp  --  ghost-robot integration + face/pivot assists,
- * ported from v1's usercontrol teleop/sysid branches. Behavior-preserving; the
- * pivot output is expressed as a chassis command (linear/angular) that the
- * DriveBase mixes back to the exact asymmetric wheel voltages v1 produced.
+ * ported from v1's usercontrol teleop branch. Behavior-preserving; the pivot
+ * output is expressed as a chassis command (linear/angular) that the DriveBase
+ * mixes back to the exact asymmetric wheel voltages v1 produced.
  * ------------------------------------------------------------------------- */
 #include "logic/TeleopTargetGenerator.h"
 #include "core/Specs.h"
-#include "core/Gains.h"
-#include "core/Limits.h"
+#include "core/Tuning.h"
 #include "config/Settings.h"
 #include "math/MathUtils.h"
 #include <algorithm>
@@ -52,29 +51,25 @@ TeleopDrive TeleopTargetGenerator::generate(RobotMode mode, const JoystickData& 
     prev_target_omega_ = target_w;
 
     TeleopDrive result;
+    (void)mode;
 
-    const bool sysid = (mode == RobotMode::SYSID_DRIVE);
-
-    // 2. Ghost pose integration (teleop/record) or pass-through (sysid).
+    // 2. Ghost pose integration.
     double tether_lin = 1.0, tether_ang = 1.0;
-    if (sysid) {
-        // SysID drives from the true pose (no virtual drift).
+    bool pivot_will_be_active = btn.b && (pivot_active_ || !prev_b_);
+    if (pivot_will_be_active) {
         vt_x_ = pose.x; vt_y_ = pose.y; vt_theta_ = pose.theta;
     } else {
-        bool pivot_will_be_active = btn.b && (pivot_active_ || !prev_b_);
-        if (pivot_will_be_active) {
-            vt_x_ = pose.x; vt_y_ = pose.y; vt_theta_ = pose.theta;
-        } else {
-            double dist_err = std::hypot(vt_x_ - pose.x, vt_y_ - pose.y);
-            double ang_err_val = std::fabs(vt_theta_ - pose.theta);
-            if (CT::TETHERING) {
-                tether_lin = (dist_err < 0.10) ? 1.0 : (0.10 / dist_err);
-                tether_ang = (ang_err_val < 0.17) ? 1.0 : (0.17 / ang_err_val);
-            }
-            vt_x_ += target_v * std::cos(vt_theta_) * DT * tether_lin * tether_ang;
-            vt_y_ += target_v * std::sin(vt_theta_) * DT * tether_lin * tether_ang;
-            vt_theta_ += target_w * DT * tether_lin * tether_ang;
+        double dist_err = std::hypot(vt_x_ - pose.x, vt_y_ - pose.y);
+        double ang_err_val = std::fabs(vt_theta_ - pose.theta);
+        const double tether_in = 0.10 * kInchesPerMeter;
+        if (CT::TETHERING) {
+            tether_lin = (dist_err < tether_in) ? 1.0 : (tether_in / dist_err);
+            tether_ang = (ang_err_val < 0.17) ? 1.0 : (0.17 / ang_err_val);
         }
+        const double step_in = target_v * DT * kInchesPerMeter * tether_lin * tether_ang;
+        vt_x_ += step_in * std::cos(vt_theta_);
+        vt_y_ += step_in * std::sin(vt_theta_);
+        vt_theta_ += target_w * DT * tether_lin * tether_ang;
     }
 
     // 3. Assemble the base target.
@@ -120,13 +115,6 @@ TeleopDrive TeleopTargetGenerator::generate(RobotMode mode, const JoystickData& 
     } else {
         pivot_active_ = false;
         prev_b_ = false;
-    }
-
-    // SysID collision snap: if commanded but stalled, re-anchor the ghost.
-    if (sysid && pivot_active_) {
-        bool collision = (std::fabs(pivot_cmd.linear - pivot_cmd.angular) > 3.0 && std::fabs(obs.left_vel_rpm) < 5.0) ||
-                         (std::fabs(pivot_cmd.linear + pivot_cmd.angular) > 3.0 && std::fabs(obs.right_vel_rpm) < 5.0);
-        if (collision) { vt_x_ = pose.x; vt_y_ = pose.y; vt_theta_ = pose.theta; }
     }
 
     prev_a_ = btn.a;

@@ -1,5 +1,6 @@
 /* ExtendedKalmanFilter.cpp -- ported verbatim from v1 lib_control.cpp (EKF). */
 #include "math/ExtendedKalmanFilter.h"
+#include "core/Tuning.h"
 #include <cmath>
 
 static double normalize_angle_ekf(double a) {
@@ -29,10 +30,10 @@ void ExtendedKalmanFilter::reset(double x0, double y0, double theta0, double v0,
     x[5] = 0.0; x[6] = 0.0; x[7] = 0.0; x[8] = 0.0;
     for (int i = 0; i < N; ++i)
         for (int j = 0; j < N; ++j)
-            P[i][j] = (i == j) ? 0.1 : 0.0;
-    P[0][0] = P[1][1] = P[2][2] = 0.01;
-    P[3][3] = P[4][4] = 0.05;
-    P[5][5] = P[6][6] = P[7][7] = P[8][8] = 1.0;
+            P[i][j] = (i == j) ? Ekf::P0_DIAG : 0.0;
+    P[0][0] = P[1][1] = P[2][2] = Ekf::P0_POSE;
+    P[3][3] = P[4][4] = Ekf::P0_VEL;
+    P[5][5] = P[6][6] = P[7][7] = P[8][8] = Ekf::P0_ACC;
 }
 
 void ExtendedKalmanFilter::predict(double dt, double a_cmd_input, double alpha_cmd_input) {
@@ -48,10 +49,10 @@ void ExtendedKalmanFilter::predict(double dt, double a_cmd_input, double alpha_c
     double new_theta = normalize_angle_ekf(ptheta + pomega * dt);
     double new_v = pv + pa_act * dt;
     double new_omega = pomega + palpha_act * dt;
-    const double tau = 0.04;
+    const double tau = Ekf::CMD_TAU_SEC;
     double alpha_lag = dt / (tau + dt);
-    double new_a_act = pa_act + (pa_cmd - pa_act) * 0.2;
-    double new_alpha_act = palpha_act + (palpha_cmd - palpha_act) * 0.2;
+    double new_a_act = pa_act + (pa_cmd - pa_act) * Ekf::ACT_BLEND;
+    double new_alpha_act = palpha_act + (palpha_cmd - palpha_act) * Ekf::ACT_BLEND;
     double new_a_cmd = pa_cmd + alpha_lag * (a_cmd_input - pa_cmd);
     double new_alpha_cmd = palpha_cmd + alpha_lag * (alpha_cmd_input - palpha_cmd);
 
@@ -63,8 +64,8 @@ void ExtendedKalmanFilter::predict(double dt, double a_cmd_input, double alpha_c
     F[2][4] = dt;
     F[3][5] = dt;
     F[4][6] = dt;
-    F[5][7] = 0.2;  F[5][5] = 0.8;
-    F[6][8] = 0.2;  F[6][6] = 0.8;
+    F[5][7] = Ekf::ACT_BLEND;  F[5][5] = 1.0 - Ekf::ACT_BLEND;
+    F[6][8] = Ekf::ACT_BLEND;  F[6][6] = 1.0 - Ekf::ACT_BLEND;
     F[7][7] = 1.0 - alpha_lag;
     F[8][8] = 1.0 - alpha_lag;
 

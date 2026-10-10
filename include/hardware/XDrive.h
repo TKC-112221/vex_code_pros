@@ -29,6 +29,8 @@ public:
     ~XDrive() override;
 
     void initialize() override;
+    void beginSensorCalibration() override;
+    void waitSensorCalibration() override;
     void calibrateSensors() override;
 
     JoystickData readJoystick() override;

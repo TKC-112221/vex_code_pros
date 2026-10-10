@@ -7,8 +7,7 @@
 #include "control/CascadedController.h"
 #include "math/MathUtils.h"
 #include "core/Specs.h"
-#include "core/Gains.h"
-#include "core/Limits.h"
+#include "core/Tuning.h"
 #include "config/Settings.h"
 #include <algorithm>
 #include <cmath>
@@ -34,9 +33,12 @@ void CascadedController::reset() {
     ekf_.reset();
 }
 
-ChassisCommand CascadedController::computeCommand(const Pose2d& pose,
-                                                  const MotionTarget& target,
+ChassisCommand CascadedController::computeCommand(const Pose2d& pose_in,
+                                                  const MotionTarget& target_in,
                                                   const ChassisObservation& obs) {
+    const Pose2d pose = poseInchesToMeters(pose_in);
+    MotionTarget target = target_in;
+    target.pose = poseInchesToMeters(target_in.pose);
     namespace CT = Settings::ControlToggles;
 
     // REPLAY_VOLTAGE_FALLBACK: emit the recorded chassis effort directly.
@@ -82,7 +84,8 @@ ChassisCommand CascadedController::computeCommand(const Pose2d& pose,
 
     // 3. Spatial warp (slow down when far from target; off in teleop).
     double spatial_error = std::sqrt(ex * ex + ey * ey);
-    double s_factor = (CT::ENABLE_SPATIAL_WARP && spatial_error >= 0.1) ? (0.1 / spatial_error) : 1.0;
+    double s_factor = (CT::ENABLE_SPATIAL_WARP && spatial_error >= Gains::SPATIAL_WARP_M)
+        ? (Gains::SPATIAL_WARP_M / spatial_error) : 1.0;
     double v_ref_warped = target.velocity.vx * s_factor;
     double omega_ref_warped = omega_ref * s_factor;
     double s_sq = s_factor * s_factor;
@@ -92,8 +95,10 @@ ChassisCommand CascadedController::computeCommand(const Pose2d& pose,
     if (CT::RAMSETE) {
         integral_error_lin_pos = prev_error_lin_pos = 0;
         integral_error_ang_pos = prev_error_ang_pos = 0;
-        double v_ref_for_gain = (std::fabs(target.velocity.vx) < 0.2) ? 0.2 : target.velocity.vx;
-        double omega_ref_for_gain = (std::fabs(omega_ref) < 0.2) ? 0.2 : omega_ref;
+        double v_ref_for_gain = (std::fabs(target.velocity.vx) < Gains::Ramsete::SPEED_FLOOR)
+            ? Gains::Ramsete::SPEED_FLOOR : target.velocity.vx;
+        double omega_ref_for_gain = (std::fabs(omega_ref) < Gains::Ramsete::SPEED_FLOOR)
+            ? Gains::Ramsete::SPEED_FLOOR : omega_ref;
         double k = (2.0 * Gains::Ramsete::ZETA) *
                    std::sqrt(Gains::Ramsete::B * std::pow(v_ref_for_gain, 2) + std::pow(omega_ref_for_gain, 2));
         v_cmd = v_ref_warped * cos(e_theta) + k * e_x_robot;
@@ -110,7 +115,8 @@ ChassisCommand CascadedController::computeCommand(const Pose2d& pose,
             double e_theta_pos = e_theta_ekf;
             if (CT::POSITION_PID_LIN) {
                 integral_error_lin_pos = integral_error_lin_pos * PidGains::Position::Linear.iDecay + e_x_robot_pos * dt;
-                integral_error_lin_pos = clamp_val(integral_error_lin_pos, -2.0, 2.0);
+                integral_error_lin_pos = clamp_val(integral_error_lin_pos,
+                    -PidGains::Position::INTEGRAL_LIMIT, PidGains::Position::INTEGRAL_LIMIT);
                 double deriv = (e_x_robot_pos - prev_error_lin_pos) / dt;
                 prev_error_lin_pos = e_x_robot_pos;
                 double corr = PidGains::Position::Linear.kP * e_x_robot_pos
@@ -120,7 +126,8 @@ ChassisCommand CascadedController::computeCommand(const Pose2d& pose,
             }
             if (CT::POSITION_PID_ANG) {
                 integral_error_ang_pos = integral_error_ang_pos * PidGains::Position::Angular.iDecay + e_theta_pos * dt;
-                integral_error_ang_pos = clamp_val(integral_error_ang_pos, -2.0, 2.0);
+                integral_error_ang_pos = clamp_val(integral_error_ang_pos,
+                    -PidGains::Position::INTEGRAL_LIMIT, PidGains::Position::INTEGRAL_LIMIT);
                 double deriv = (e_theta_pos - prev_error_ang_pos) / dt;
                 prev_error_ang_pos = e_theta_pos;
                 double corr = PidGains::Position::Angular.kP * e_theta_pos
@@ -149,8 +156,8 @@ ChassisCommand CascadedController::computeCommand(const Pose2d& pose,
         vol_lat_ff = target.ref_lateral_effort;
         vol_ang_ff = target.ref_angular_effort;
     } else {
-        double turn_radius = (std::fabs(omega_cmd) < 0.01) ? Physics::TURN_RADIUS_MAX_M
-                           : std::min(std::fabs(v_cmd) / (std::fabs(omega_cmd) + 0.01), Physics::TURN_RADIUS_MAX_M);
+        double turn_radius = (std::fabs(omega_cmd) < Physics::OMEGA_EPS) ? Physics::TURN_RADIUS_MAX_M
+                           : std::min(std::fabs(v_cmd) / (std::fabs(omega_cmd) + Physics::OMEGA_EPS), Physics::TURN_RADIUS_MAX_M);
         vol_lin_ff = feedforward_->linearVolts(v_cmd, a_cmd * s_sq, std::fabs(v_cmd),
                                                std::fabs(a_cmd * s_sq), omega_cmd, turn_radius);
         vol_lat_ff = 0.0;  // no lateral dynamics model yet

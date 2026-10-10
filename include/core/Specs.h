@@ -8,6 +8,7 @@
 namespace Robot {
 
     constexpr double PI = 3.14159265358979323846;
+    constexpr double G_MPS2 = 9.80665;
 
     namespace Chassis {
         constexpr double WHEEL_DIAMETER_IN = 3.25;
@@ -24,8 +25,8 @@ namespace Robot {
     // XY of Field::Point::Align. Heading is not stored; the boomerang caller
     // passes it when the drive starts.
     namespace Align {
-        constexpr double POINT_X_M = -11.5 * 0.0254;
-        constexpr double POINT_Y_M = -2.0 * 0.0254;
+        constexpr double POINT_X_IN = -11.5;
+        constexpr double POINT_Y_IN = -2.0;
     }
     constexpr double ODOM_IMU_WEIGHT = 1.0;
 
@@ -47,7 +48,7 @@ namespace Robot {
         constexpr double MAX_M = 2.000;
         constexpr double NEAR_M = 0.200;
         constexpr double ACCURACY_NEAR_M = 0.015;
-        constexpr double ACCURACY_FRAC = 0.05;
+        constexpr double ACCURACY_FRAC = 0.0288;
         constexpr int CONF_NEAR = 10;
         constexpr double UPDATE_SEC = 0.033;
         struct Mount { double x; double y; double yaw; };
@@ -107,7 +108,7 @@ namespace Robot {
     }
 
     // Derived values used throughout the codebase.
-    constexpr double METERS_PER_TURN     = Chassis::WHEEL_DIAMETER_M * PI * 0.75;
+    constexpr double METERS_PER_TURN     = Chassis::WHEEL_DIAMETER_M * PI / Chassis::GEAR_RATIO;
     constexpr double RPM_TO_MPS          = METERS_PER_TURN / 60.0;
     constexpr double THEORETICAL_MAX_VEL = (Drive::MOTOR_RPM_CART / 60.0) * PI
                                            * Chassis::WHEEL_DIAMETER_M * Chassis::GEAR_RATIO;

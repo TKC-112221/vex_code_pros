@@ -2,7 +2,7 @@
 /* ---------------------------------------------------------------------------
  * FieldPoints  --  named positions on the 12 ft field.
  *
- * x and y are meters in the Pose2d frame: origin at the field center, +x
+ * x and y are inches in the Pose2d frame: origin at the field center, +x
  * toward the field's +X wall, +y toward the +Y wall. A spot has no heading.
  * Pass the approach heading into BoomerangProcessor::start when a drive begins.
  *
@@ -31,7 +31,7 @@ struct Spot {
 
 constexpr Spot kSpots[] = {
     {0.0, 0.0, "center"},
-    {Robot::Align::POINT_X_M, Robot::Align::POINT_Y_M, "align"},
+    {Robot::Align::POINT_X_IN, Robot::Align::POINT_Y_IN, "align"},
 };
 
 static_assert(sizeof(kSpots) / sizeof(kSpots[0]) == static_cast<std::size_t>(Point::Count),

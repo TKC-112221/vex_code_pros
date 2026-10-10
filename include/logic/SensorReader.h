@@ -4,8 +4,11 @@
  * package ({sensors, joystick, buttons}) for one control tick. sensors is the
  * dict localization reads: chassis plus distance D1..D4.
  *
- * Noisy channels are denoised by applySensorKalman (math/SensorKalman.h).
- * Wheel-travel increments stay raw.
+ * Noisy channels are denoised by the filter selected in
+ * Settings::ControlToggles::SAVITZKY_GOLAY_FILTER: a causal Savitzky-Golay
+ * (math/SensorSavitzkyGolay.h) or the 3-sample Kalman (math/SensorKalman.h).
+ * Wheel-travel increments stay raw. The pre-filter dict is kept on
+ * RobotReading::raw for the recorder.
  * ------------------------------------------------------------------------- */
 
 #include "core/Types.h"

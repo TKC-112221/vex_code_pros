@@ -15,21 +15,20 @@ public:
 
     // --- Persistence ---
     virtual void loadFromHeader() = 0;      // load the compiled-in recording
-    virtual void saveToConsole() = 0;       // dump the buffer as CSV over stdout
+    virtual void saveToConsole() = 0;       // dump the buffer to the SD card
 
     // --- Recording ---
-    virtual void beginRecording(RobotMode mode, const Pose2d& startPose) = 0;
+    virtual void beginRecording(const Pose2d& startPose) = 0;
     // `command` is the chassis-frame intent (surge/sway/yaw); `applied` is the
-    // post-safety chassis effort actually sent to the drivebase. Neither is
-    // stick- or wheel-specific. *_error are controller diagnostics for this tick.
-    virtual void recordFrame(const MotionTarget& target,
-                             const Pose2d& actual,
+    // post-safety chassis effort actually sent to the drivebase. Pose is the
+    // estimator pose. `obs` is the live (denoised) chassis sample; `raw` is
+    // the pre-filter sensor dict from the same tick.
+    virtual void recordFrame(const Pose2d& pose,
                              const CommandVector& command,
                              const ChassisCommand& applied,
                              const SubsystemCommand& sub,
                              const ChassisObservation& obs,
-                             double lin_error,
-                             double ang_error) = 0;
+                             const SensorDict& raw) = 0;
     virtual int  getFrameCount() const = 0;
 
     // --- Replay (motion source) ---

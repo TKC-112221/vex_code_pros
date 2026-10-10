@@ -18,6 +18,12 @@ public:
         : kS_lin_(kS_lin), kV_lin_(kV_lin), kA_lin_(kA_lin),
           kS_ang_(kS_ang), kV_ang_(kV_ang), kA_ang_(kA_ang) {}
 
+    void setGains(double kS_lin, double kV_lin, double kA_lin,
+                  double kS_ang, double kV_ang, double kA_ang) {
+        kS_lin_ = kS_lin; kV_lin_ = kV_lin; kA_lin_ = kA_lin;
+        kS_ang_ = kS_ang; kV_ang_ = kV_ang; kA_ang_ = kA_ang;
+    }
+
     double linearVolts(double velocity, double accel, double /*abs_lin_vel*/,
                        double /*abs_lin_accel*/, double /*omega*/,
                        double /*turn_radius*/) const override {

@@ -28,5 +28,7 @@ OverrideResult userInputOverride(const ChassisObservation& sensor,
                                  const IFeedForward* model);
 
 // Polyline of whichever override is running, for the field window.
-// Returns 0 when none is.
-int userInputOverridePath(const Pose2d& from, Pose2d* out, int cap);
+// Returns 0 when none is. v_lin and v_ang are the measured momentum
+// Hermite opens along.
+int userInputOverridePath(const Pose2d& from, Pose2d* out, int cap,
+                          double v_lin = 0, double v_ang = 0);

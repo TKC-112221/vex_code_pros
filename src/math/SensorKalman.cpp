@@ -11,6 +11,7 @@
 #include "math/SensorKalman.h"
 
 #include "core/Specs.h"
+#include "core/Tuning.h"
 
 #include <cmath>
 
@@ -18,7 +19,7 @@ namespace {
 
 class ScalarKalman {
 public:
-    static constexpr int kWindow = 3;
+    static constexpr int kWindow = SensorFilter::KALMAN_WINDOW;
 
     void reset() {
         x_ = 0.0;
@@ -67,10 +68,6 @@ struct SensorFilters {
     ScalarKalman v_ang;
     ScalarKalman left_vel_rpm;
     ScalarKalman right_vel_rpm;
-    ScalarKalman imu_heading_deg;
-    ScalarKalman imu_rate_z_dps;
-    ScalarKalman imu_accel_x;
-    ScalarKalman imu_accel_y;
     ScalarKalman range[kDistanceChannels];
     int range_miss[kDistanceChannels] = {};
 
@@ -80,10 +77,6 @@ struct SensorFilters {
         v_ang.reset();
         left_vel_rpm.reset();
         right_vel_rpm.reset();
-        imu_heading_deg.reset();
-        imu_rate_z_dps.reset();
-        imu_accel_x.reset();
-        imu_accel_y.reset();
         for (int i = 0; i < kDistanceChannels; ++i) {
             range[i].reset();
             range_miss[i] = 0;
@@ -113,18 +106,14 @@ double rangeDelta(int index, double forward_delta, double strafe_delta, double v
 void filterChassis(ChassisObservation& obs) {
     // Raw gyro rate, captured before v_ang itself is smoothed. heading_rad and
     // v_ang share a sign (both negated from the IMU), so this is d(heading)/dt.
-    // imu_heading_deg is left unpredicted: in IMU fallback its stored rate has
-    // the opposite sign, and localization does not consume that channel.
+    // IMU accel / rate stay raw for recording bandwidth; ImuLinearDelta owns
+    // their bias model.
     const double heading_delta = obs.v_ang * System::DT_SEC;
     obs.heading_rad = filterChannel(g_filters.heading, obs.heading_rad, heading_delta);
     obs.v_lin = filterChannel(g_filters.v_lin, obs.v_lin);
     obs.v_ang = filterChannel(g_filters.v_ang, obs.v_ang);
     obs.left_vel_rpm = filterChannel(g_filters.left_vel_rpm, obs.left_vel_rpm);
     obs.right_vel_rpm = filterChannel(g_filters.right_vel_rpm, obs.right_vel_rpm);
-    obs.imu_heading_deg = filterChannel(g_filters.imu_heading_deg, obs.imu_heading_deg);
-    obs.imu_rate_z_dps = filterChannel(g_filters.imu_rate_z_dps, obs.imu_rate_z_dps);
-    obs.imu_accel_x = filterChannel(g_filters.imu_accel_x, obs.imu_accel_x);
-    obs.imu_accel_y = filterChannel(g_filters.imu_accel_y, obs.imu_accel_y);
 }
 
 void filterDistances(DistanceReading (&distance)[kDistanceChannels],

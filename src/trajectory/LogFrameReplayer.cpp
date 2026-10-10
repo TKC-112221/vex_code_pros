@@ -1,12 +1,11 @@
 /* ---------------------------------------------------------------------------
- * LogFrameReplayer.cpp  --  ported from v1 robot_logic.cpp (save/load/replay)
- * and the usercontrol logging block. The per-tick replay body becomes
- * getNextTarget(): it emits an interpolated MotionTarget carrying the recorded
+ * LogFrameReplayer.cpp  --  unified record / replay for trajectory + sysid.
+ * Per-tick replay emits an interpolated MotionTarget carrying the recorded
  * chassis effort and advances the playback cursor with a battery time-warp.
  * ------------------------------------------------------------------------- */
 #include "trajectory/LogFrameReplayer.h"
 #include "config/Settings.h"
-#include "core/Gains.h"
+#include "core/Tuning.h"
 #include "math/MathUtils.h"
 #include "platform/RobotFile.h"
 #include "api.h"
@@ -48,34 +47,28 @@ void LogFrameReplayer::loadFromHeader() {
     }
 }
 
-void LogFrameReplayer::beginRecording(RobotMode mode, const Pose2d& /*startPose*/) {
-    recording_mode_ = mode;
+void LogFrameReplayer::beginRecording(const Pose2d& /*startPose*/) {
     length_ = 0;
 }
 
-void LogFrameReplayer::recordFrame(const MotionTarget& target, const Pose2d& actual,
-                                   const CommandVector& command, const ChassisCommand& applied,
-                                   const SubsystemCommand& sub, const ChassisObservation& obs,
-                                   double lin_error, double ang_error) {
+void LogFrameReplayer::recordFrame(const Pose2d& pose,
+                                   const CommandVector& command,
+                                   const ChassisCommand& applied,
+                                   const SubsystemCommand& sub,
+                                   const ChassisObservation& obs,
+                                   const SensorDict& raw) {
     if (length_ >= System::MAX_RECORD_FRAMES) return;
     LogFrame& f = buffer_[length_];
     f.time = pros::millis() / 1000.0;
 
-    bool sysid = (recording_mode_ == RobotMode::SYSID_DRIVE);
-    f.x = sysid ? 0.0 : target.pose.x;
-    f.y = sysid ? 0.0 : target.pose.y;
-    f.theta = sysid ? 0.0 : target.pose.theta;
+    f.x = pose.x;
+    f.y = pose.y;
+    f.theta = pose.theta;
 
-    f.v_ref = target.velocity.vx;
-    f.omega_ref = target.velocity.omega;
-    f.a_ref = target.accel_lin;
-    f.alpha_ref = target.accel_ang;
-    f.lin_error = lin_error;
-    f.ang_error = ang_error;
-
-    f.actual_x = actual.x;
-    f.actual_y = actual.y;
-    f.actual_theta = actual.theta;
+    f.v_lin = obs.v_lin;
+    f.v_ang = obs.v_ang;
+    f.v_inertial_fwd = obs.v_inertial_fwd;
+    f.v_inertial_lat = obs.v_inertial_lat;
 
     f.cmd_surge = command.surge;
     f.cmd_sway  = command.sway;
@@ -85,22 +78,41 @@ void LogFrameReplayer::recordFrame(const MotionTarget& target, const Pose2d& act
     f.applied_lateral = applied.lateral;
     f.applied_angular = applied.angular;
 
-    f.l_pos_deg = obs.left_pos_deg;   f.r_pos_deg = obs.right_pos_deg;
-    f.l_vel_rpm = obs.left_vel_rpm;   f.r_vel_rpm = obs.right_vel_rpm;
+    f.l_pos_deg = obs.left_pos_deg;
+    f.r_pos_deg = obs.right_pos_deg;
     f.l_current_amps = obs.left_current_amps;
     f.r_current_amps = obs.right_current_amps;
+    f.l_temp_c = obs.left_temp_c;
+    f.r_temp_c = obs.right_temp_c;
     f.battery_voltage = obs.battery_voltage;
-    f.imu_accel_x = obs.imu_accel_x;  f.imu_accel_y = obs.imu_accel_y;
-    f.imu_heading = obs.imu_heading_deg;
-    f.imu_rate_z = obs.imu_rate_z_dps;
+
+    f.imu_accel_x = obs.imu_accel_x;
+    f.imu_accel_y = obs.imu_accel_y;
+    f.imu_rate_z  = obs.imu_rate_z_dps;
     f.subsystems = sub.raw_bitmask;
+
+    f.raw_heading_rad = raw.chassis.heading_rad;
+    f.raw_v_lin = raw.chassis.v_lin;
+    f.raw_v_ang = raw.chassis.v_ang;
+    f.raw_l_vel_rpm = raw.chassis.left_vel_rpm;
+    f.raw_r_vel_rpm = raw.chassis.right_vel_rpm;
+    f.raw_fwd_m = raw.chassis.forward_delta;
+    f.raw_strafe_m = raw.chassis.strafe_delta;
+    f.raw_range_valid = 0;
+    for (int i = 0; i < kDistanceChannels; ++i) {
+        f.raw_range_m[i] = raw.distance[i].valid ? raw.distance[i].range_m : 0.0;
+        int conf = raw.distance[i].confidence;
+        if (conf < 0) conf = 0;
+        if (conf > 63) conf = 63;
+        f.raw_range_conf[i] = static_cast<uint8_t>(conf);
+        if (raw.distance[i].valid) f.raw_range_valid |= static_cast<uint8_t>(1u << i);
+    }
 
     length_++;
 }
 
 void LogFrameReplayer::saveToConsole() {
-    const char* filepath = (recording_mode_ == RobotMode::SYSID_DRIVE) ? "/usd/sysid.bin" :
-                           (Settings::SKILLS_MODE) ? "/usd/skills_auto.bin" : "/usd/prematch.bin";
+    const char* filepath = Settings::SKILLS_MODE ? "/usd/skills_auto.bin" : "/usd/prematch.bin";
 
     FILE* file = openRobotFile(filepath, "wb");
     if (file) {
@@ -160,10 +172,14 @@ MotionTarget LogFrameReplayer::getNextTarget(const Pose2d& pose, const ChassisOb
     target.pose.x = lerp(f0.x, f1.x);
     target.pose.y = lerp(f0.y, f1.y);
     target.pose.theta = f0.theta + t * normalize_angle(f1.theta - f0.theta);
-    target.velocity.vx = lerp(f0.v_ref, f1.v_ref);
-    target.velocity.omega = lerp(f0.omega_ref, f1.omega_ref);
-    target.accel_lin = lerp(f0.a_ref, f1.a_ref);
-    target.accel_ang = lerp(f0.alpha_ref, f1.alpha_ref);
+    target.velocity.vx = lerp(f0.v_lin, f1.v_lin);
+    target.velocity.omega = lerp(f0.v_ang, f1.v_ang);
+    // Accel refs are finite-differenced from measured rates when both samples exist.
+    double dt = f1.time - f0.time;
+    if (dt > 1e-4) {
+        target.accel_lin = (f1.v_lin - f0.v_lin) / dt;
+        target.accel_ang = (f1.v_ang - f0.v_ang) / dt;
+    }
 
     double interp_lin = lerp(f0.applied_linear,  f1.applied_linear);
     double interp_lat = lerp(f0.applied_lateral, f1.applied_lateral);
@@ -199,7 +215,7 @@ MotionTarget LogFrameReplayer::getNextTarget(const Pose2d& pose, const ChassisOb
     double peak = std::max({std::fabs(scaled_lin), std::fabs(scaled_lat), std::fabs(scaled_ang)});
     double warp = 1.0;
     double recorded_batt = f0.battery_voltage;
-    if (recorded_batt > 5.0 && obs.battery_voltage > 5.0) {
+    if (recorded_batt > Controls::BATTERY_VALID_V && obs.battery_voltage > Controls::BATTERY_VALID_V) {
         bool voltage_limited = peak > obs.battery_voltage;
         if (voltage_limited) {
             double ratio = obs.battery_voltage / recorded_batt;

@@ -1,11 +1,12 @@
 #pragma once
 /* ---------------------------------------------------------------------------
- * FieldWindow  --  desktop stand-in for the V5 controller and brain screen.
- * The host link provides the Win32 implementation. The V5 image does not
- * compile this directory.
+ * FieldWindow  --  desktop field view, plus the V5 brain and controller
+ * screens in a panel beside it. The host link provides the Win32
+ * implementation. The V5 image does not compile this directory.
  * ------------------------------------------------------------------------- */
 
 #include "core/Types.h"
+#include <cstdint>
 
 namespace fieldwindow {
 
@@ -22,5 +23,22 @@ void render(const Pose2d& truth, const Pose2d& estimate,
 // window shows this polyline. When active goes false the last curve stays
 // for 5 seconds and then clears. count 0 is not a curve.
 void setFollowPath(const Pose2d* points, int count, bool active);
+
+// Brain LCD contents, 0x00RRGGBB, row-major from the top. Copied. nullptr
+// clears it so the panel shows LLEMU text again.
+void setBrainFrame(const std::uint32_t* rgb, int width, int height);
+
+// Create the window on the calling thread. The pipeline may draw into it
+// afterwards, but it must not be the thread that creates it.
+void open();
+
+// Open the main window if needed, paint, and pump messages for hold_ms.
+// False when Escape is pressed or the brain screen is clicked. Closing
+// the window quits. Call only from the thread that will own the window.
+bool pump(std::uint32_t hold_ms);
+
+// Message loop for that same thread after startup. Does not return.
+// The pipeline must not dispatch window messages itself.
+void run();
 
 }

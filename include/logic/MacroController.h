@@ -24,7 +24,12 @@ public:
     // Decode a recorded bitmask into a subsystem command (replay path).
     SubsystemCommand decodeRecorded(uint8_t bitmask) const override;
 
+    SubsystemIntent subsystemIntent() const override { return intent_; }
+
 private:
+    void captureIntent(bool r1, bool r2, bool l1, bool l2);
+
+    SubsystemIntent intent_{};
     bool g_state_ = false, b_state_ = false;
     bool prev_up_ = false, prev_dw_ = false;
     uint32_t abort_ts_ = 0;

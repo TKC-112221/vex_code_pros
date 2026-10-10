@@ -1,33 +1,65 @@
 /* ---------------------------------------------------------------------------
  * UIManager.cpp  --  controller screen + brain LLEMU + mode/utility buttons.
- * The V5 controller screen is rate-limited, so periodic status updates are
- * throttled and lines are overwritten with padding instead of a full clear.
+ * Brain LLEMU is a label update (LVGL draws on its own task), so all three
+ * lines are written on the pipeline. The controller link is the slow call:
+ * one line per flush, at least 50 ms apart, and only when that line changed.
  * ------------------------------------------------------------------------- */
 #include "logic/UIManager.h"
 #include <cstdio>
+#include <cstring>
 #include <cmath>
+
+namespace {
+constexpr uint32_t kStatusPeriodMs = 100;
+constexpr uint32_t kControllerLineMs = 50;
+}
 
 UIManager::UIManager() {
     ctrl_ = new pros::Controller(pros::E_CONTROLLER_MASTER);
-    // False on the host (no brain LCD). True on the V5 when LLEMU starts.
+    // Host paints LLEMU on the field window. The V5 starts LLEMU here.
     brain_ok_ = pros::lcd::initialize();
 }
 
-void UIManager::writeScreens(const char* l0, const char* l1, const char* l2) {
-    ctrl_->print(0, 0, "%-19s", l0);
-    ctrl_->print(1, 0, "%-19s", l1);
-    ctrl_->print(2, 0, "%-19s", l2);
+void UIManager::publishLines(const char* l0, const char* l1, const char* l2) {
+    std::snprintf(lines_[0], sizeof(lines_[0]), "%s", l0 != nullptr ? l0 : "");
+    std::snprintf(lines_[1], sizeof(lines_[1]), "%s", l1 != nullptr ? l1 : "");
+    std::snprintf(lines_[2], sizeof(lines_[2]), "%s", l2 != nullptr ? l2 : "");
+    writeBrain();
+    flushControllerLine();
+}
 
-    if (brain_ok_) {
-        // Brain LLEMU has more columns; mirror the same three status lines.
-        pros::lcd::print(0, "%s", l0);
-        pros::lcd::print(1, "%s", l1);
-        pros::lcd::print(2, "%s", l2);
+void UIManager::setBrainUpdates(bool on) {
+    brain_updates_.store(on);
+}
+
+void UIManager::writeBrain() {
+    if (!brain_ok_ || !brain_updates_.load()) return;
+    pros::lcd::print(0, "%s", lines_[0]);
+    pros::lcd::print(1, "%s", lines_[1]);
+    pros::lcd::print(2, "%s", lines_[2]);
+}
+
+void UIManager::flushControllerLine() {
+    const uint32_t now = pros::millis();
+    if (ctrl_paced_ && now - last_ctrl_ms_ < kControllerLineMs) return;
+
+    for (int n = 0; n < 3; ++n) {
+        const int line = (ctrl_line_ + n) % 3;
+        if (ctrl_known_[line] && std::strcmp(lines_[line], sent_[line]) == 0) continue;
+
+        // Pad so a shorter string overwrites the previous characters.
+        ctrl_->print((std::uint8_t)line, 0, "%-19s", lines_[line]);
+        std::snprintf(sent_[line], sizeof(sent_[line]), "%s", lines_[line]);
+        ctrl_known_[line] = true;
+        ctrl_paced_ = true;
+        last_ctrl_ms_ = now;
+        ctrl_line_ = (std::uint8_t)((line + 1) % 3);
+        return;
     }
 }
 
 void UIManager::displayMessage(const char* msg) {
-    writeScreens(msg, "", "");
+    publishLines(msg, "", "");
 }
 
 RobotMode UIManager::processStateToggles(const ButtonState& btn, RobotMode mode) {
@@ -37,14 +69,8 @@ RobotMode UIManager::processStateToggles(const ButtonState& btn, RobotMode mode)
     if (btn.down && !prev_dw_) debug_ = !debug_;
     prev_dw_ = btn.down;
 
-    // Right: IDLE <-> SYSID_DRIVE (0.3 s debounce).
-    if (btn.right && !prev_right_ && (now - last_t_right_ > 300)) {
-        mode = (mode == RobotMode::IDLE) ? RobotMode::SYSID_DRIVE : RobotMode::IDLE;
-        last_t_right_ = now;
-    }
-    prev_right_ = btn.right;
-
-    // Left: IDLE <-> RECORDING (0.3 s debounce).
+    // Left: IDLE <-> RECORDING (0.3 s debounce). One unified capture for
+    // trajectory replay and system identification.
     if (btn.left && !prev_left_ && (now - last_t_left_ > 300)) {
         if (mode == RobotMode::IDLE)            mode = RobotMode::RECORDING;
         else if (mode == RobotMode::RECORDING)  mode = RobotMode::IDLE;
@@ -84,39 +110,41 @@ bool UIManager::checkAutonTestRequested(const ButtonState& btn) {
 
 static const char* modeName(RobotMode m) {
     switch (m) {
-        case RobotMode::IDLE:        return "IDLE";
-        case RobotMode::RECORDING:   return "REC: TRAJ";
-        case RobotMode::REPLAYING:   return "REPLAYING";
-        case RobotMode::SYSID_DRIVE: return "REC: SYSID";
+        case RobotMode::IDLE:      return "IDLE";
+        case RobotMode::RECORDING: return "RECORDING";
+        case RobotMode::REPLAYING: return "REPLAYING";
+        case RobotMode::COMMAND:   return "COMMAND";
     }
     return "UNKNOWN";
 }
 
 void UIManager::updateDisplay(RobotMode mode, const Pose2d& pose, double total_heading,
-                              int frame_count, RobotMode last_recording_mode) {
-    // Throttle: the V5 controller screen cannot keep up with a 10 ms loop.
-    uint32_t now = pros::millis();
-    if (now - last_display_ms_ < 100) return;
-    last_display_ms_ = now;
+                              int frame_count) {
+    const uint32_t now = pros::millis();
+    if (now - last_display_ms_ >= kStatusPeriodMs) {
+        last_display_ms_ = now;
 
-    char l0[24] = "", l1[24] = "", l2[24] = "";
-    if (debug_) {
-        snprintf(l0, sizeof(l0), "X:%5.2f Y:%5.2f", pose.x, pose.y);
-        snprintf(l1, sizeof(l1), "H:%5.1f deg", total_heading * (180.0 / M_PI));
-        snprintf(l2, sizeof(l2), "-- ODOM DEBUG --");
-    } else {
-        if (mode == RobotMode::RECORDING || mode == RobotMode::SYSID_DRIVE) {
-            snprintf(l2, sizeof(l2), "REC: %d", frame_count);
+        lines_[0][0] = '\0';
+        lines_[1][0] = '\0';
+        lines_[2][0] = '\0';
+        if (debug_) {
+            std::snprintf(lines_[0], sizeof(lines_[0]), "X:%5.1f Y:%5.1f in", pose.x, pose.y);
+            std::snprintf(lines_[1], sizeof(lines_[1]), "H:%5.1f deg", total_heading * (180.0 / M_PI));
+            std::snprintf(lines_[2], sizeof(lines_[2]), "-- ODOM DEBUG --");
+        } else if (mode == RobotMode::RECORDING) {
+            std::snprintf(lines_[2], sizeof(lines_[2]), "REC: %d", frame_count);
         } else if (mode == RobotMode::IDLE) {
             if (frame_count > 0)
-                snprintf(l2, sizeof(l2), "Save Ready: %s",
-                         (last_recording_mode == RobotMode::SYSID_DRIVE ? "SYSID" : "TRAJ"));
+                std::snprintf(lines_[2], sizeof(lines_[2]), "Save Ready: %d", frame_count);
             else
-                snprintf(l2, sizeof(l2), "IDLE: Empty");
+                std::snprintf(lines_[2], sizeof(lines_[2]), "IDLE: Empty");
         } else {
-            snprintf(l2, sizeof(l2), "%s", modeName(mode));
+            std::snprintf(lines_[2], sizeof(lines_[2]), "%s", modeName(mode));
         }
+        writeBrain();
     }
 
-    writeScreens(l0, l1, l2);
+    // Runs on the ticks that did not rebuild text, so a dirty line still
+    // goes out 50 ms after the previous one.
+    flushControllerLine();
 }

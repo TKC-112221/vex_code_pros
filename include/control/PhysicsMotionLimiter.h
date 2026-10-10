@@ -16,7 +16,7 @@
 #include "interfaces/IMotionLimiter.h"
 #include "interfaces/IDynamicsModel.h"
 #include "core/Specs.h"
-#include "core/Limits.h"
+#include "core/Tuning.h"
 #include <algorithm>
 #include <cmath>
 

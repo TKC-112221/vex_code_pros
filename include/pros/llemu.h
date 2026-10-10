@@ -18,6 +18,10 @@
 #include "liblvgl/llemu.h"
 #endif
 
+#if defined(ROBOT_HOST) && defined(__cplusplus)
+#include "host/DeviceScreens.h"
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 namespace pros {
@@ -47,8 +51,19 @@ namespace c {
    becomes a duplicate in every translation unit. inline is COMDAT instead.
    weak must be omitted here: combined with inline, clang still emits a
    strong external on the MSVC target. */
-inline bool lcd_print(__attribute__((unused)) int16_t line, __attribute__((unused)) const char* fmt, ...) {
+inline bool lcd_print(int16_t line, const char* fmt, ...) {
+#if defined(ROBOT_HOST)
+    if (line < 0 || line > 7 || fmt == nullptr) return false;
+    va_list args;
+    va_start(args, fmt);
+    host_lcd_vprint((int)line, fmt, args);
+    va_end(args);
+    return true;
+#else
+    (void)line;
+    (void)fmt;
     return false;
+#endif
 }
 #else
 bool __attribute__((weak)) lcd_print(__attribute__((unused)) int16_t line, __attribute__((unused)) const char* fmt, ...)  {

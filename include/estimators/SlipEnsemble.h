@@ -17,55 +17,56 @@
  * ------------------------------------------------------------------------- */
 
 #include "core/Types.h"
+#include "core/Tuning.h"
 #include <cstdint>
 
 struct SlipEnsembleConfig {
-    int count = 100;                  // clamped to [8, SlipEnsemble::kMaxParticles]
+    int count = Slip::COUNT;         // clamped to [Slip::MIN, SlipEnsemble::kMaxParticles]
 
     // Half-width of each persistent characteristic. Particle i sits on a
     // low-discrepancy point in this box, centered on "encoder and IMU are
     // right, and the robot does not skid."
-    double forward_scale_span = 0.04; // longitudinal slip, scale on forward delta
-    double strafe_scale_span = 0.08;  // lateral slip, scale on strafe delta
-    double skid_per_m_span = 0.10;    // sideways skid, meters per meter forward
-    double skid_per_rad_span = 0.08;  // sideways skid, meters per radian of turn
-    double heading_scale_span = 0.03; // scale on the measured heading change
+    double forward_scale_span = Slip::FORWARD_SCALE_SPAN;
+    double strafe_scale_span = Slip::STRAFE_SCALE_SPAN;
+    double skid_per_m_span = Slip::SKID_PER_M_SPAN;
+    double skid_per_rad_span = Slip::SKID_PER_RAD_SPAN;
+    double heading_scale_span = Slip::HEADING_SCALE_SPAN;
 
     // Per-step noise is the shared motion stddev below, times this particle's
     // own scale. The scales are spread across [min, max].
-    double noise_scale_min = 0.25;
-    double noise_scale_max = 1.25;
+    double noise_scale_min = Slip::NOISE_SCALE_MIN;
+    double noise_scale_max = Slip::NOISE_SCALE_MAX;
 
     // Shared motion stddev. Systematic skid lives in the spans above, so these
     // stay near sensor noise: a blue-cartridge tick is about 0.65 mm, and the
     // inertial rate noise is a few hundredths of a degree per second.
-    double alpha_trans = 0.015;
-    double alpha_trans_rot = 0.01;
-    double alpha_lateral = 0.01;
-    double alpha_rot = 0.02;
-    double alpha_rot_trans = 0.01;
-    double beta_trans = 0.0;
-    double beta_rot = 0.0;
+    double alpha_trans = Slip::ALPHA_TRANS;
+    double alpha_trans_rot = Slip::ALPHA_TRANS_ROT;
+    double alpha_lateral = Slip::ALPHA_LATERAL;
+    double alpha_rot = Slip::ALPHA_ROT;
+    double alpha_rot_trans = Slip::ALPHA_ROT_TRANS;
+    double beta_trans = Slip::BETA_TRANS;
+    double beta_rot = Slip::BETA_ROT;
 
     // IMU heading stddev (rad) inside the nudge. 0 disables it.
-    double sigma_heading = 0.01;
+    double sigma_heading = Slip::SIGMA_HEADING;
 
     // Fraction of the least-squares pose step to apply. 1 snaps every particle
     // onto the walls and erases which slip model was right.
-    double nudge_gain = 0.35;
-    double nudge_step_m = 0.04;       // clamp on the x and y step
-    double nudge_step_rad = 0.05;     // clamp on the heading step
+    double nudge_gain = Slip::NUDGE_GAIN;
+    double nudge_step_m = Slip::NUDGE_STEP_M;
+    double nudge_step_rad = Slip::NUDGE_STEP_RAD;
     // A beam that misses the pose agreed by the other beams by more than this
     // is treated as blocked and left out of the step. Particles may sit
     // farther than this from the walls; that distance is what the step closes.
-    double range_gate_m = 0.20;
+    double range_gate_m = Slip::RANGE_GATE_M;
 
     uint32_t seed = 1;
 };
 
 class SlipEnsemble {
 public:
-    static constexpr int kMaxParticles = 128;
+    static constexpr int kMaxParticles = Slip::MAX;
 
     SlipEnsemble();
     explicit SlipEnsemble(const SlipEnsembleConfig& cfg);

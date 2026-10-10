@@ -35,7 +35,7 @@ public:
     }
 
     void overridePose(const Pose2d& pose) override {
-        filter_.reset(pose);
+        filter_.reset(poseInchesToMeters(pose));
         last_heading_ = pose.theta;
         prev_theta_ = filter_.pose().theta;
         range_phase_ = 0;
@@ -58,19 +58,21 @@ public:
         noteHeading();
     }
 
-    void observePosition(double x_m, double y_m, double sigma_m) override {
-        filter_.correctPosition(x_m, y_m, sigma_m);
+    void observePosition(double x_in, double y_in, double sigma_in) override {
+        filter_.correctPosition(inchesToMeters(x_in), inchesToMeters(y_in),
+                                inchesToMeters(sigma_in));
         noteHeading();
     }
 
-    void observePose(const Pose2d& pose, double sigma_xy_m, double sigma_theta_rad) override {
-        filter_.correctPose(pose, sigma_xy_m, sigma_theta_rad);
+    void observePose(const Pose2d& pose, double sigma_xy_in, double sigma_theta_rad) override {
+        filter_.correctPose(poseInchesToMeters(pose), inchesToMeters(sigma_xy_in),
+                            sigma_theta_rad);
         noteHeading();
     }
 
     StateEstimate getState() const override {
         StateEstimate s;
-        s.pose = filter_.pose();
+        s.pose = poseMetersToInches(filter_.pose());
         s.v_lin = v_lin_;
         s.v_ang = v_ang_;
         return s;
@@ -85,7 +87,7 @@ public:
         if (out == nullptr || cap <= 0 || n <= 0) return 0;
         int take = n < cap ? n : cap;
         if (take == n) {
-            for (int i = 0; i < n; ++i) out[i] = filter_.particlePose(i);
+            for (int i = 0; i < n; ++i) out[i] = poseMetersToInches(filter_.particlePose(i));
             return n;
         }
         // Floyd's sample of `take` distinct indices from [0, n).
@@ -101,7 +103,8 @@ public:
             }
             chosen[got++] = seen ? j : t;
         }
-        for (int i = 0; i < got; ++i) out[i] = filter_.particlePose(chosen[i]);
+        for (int i = 0; i < got; ++i)
+            out[i] = poseMetersToInches(filter_.particlePose(chosen[i]));
         return got;
     }
 

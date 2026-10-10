@@ -2,20 +2,15 @@
  * DriftBoomerang.cpp  --  boomerang carrot, centripetal sideslip, volt command.
  * ------------------------------------------------------------------------- */
 #include "control/DriftBoomerang.h"
-#include "core/Gains.h"
+#include "core/Tuning.h"
 #include "math/MathUtils.h"
 
 #include <cmath>
 
 namespace {
 
-constexpr double kMetersPerInch = 0.0254;
-constexpr double kLemlibFullPower = 127.0;
-constexpr double kProbeM = 0.01;          // curvature finite-difference step
-constexpr double kCarrotFloorM = 0.05;    // below this, bearing curvature is noise
-
 double voltsPerPower() {
-    return System::MAX_VOLTS / kLemlibFullPower;
+    return System::MAX_VOLTS / Controller::FULL_SCALE;
 }
 
 // LemLib PID::update, derivative per tick. Windup is in the error's units.
@@ -60,17 +55,19 @@ void DriftBoomerang::reset() {
 }
 
 ChassisCommand DriftBoomerang::compute(const StateEstimate& state, const Pose2d& target) {
-    const double rx = state.pose.x;
-    const double ry = state.pose.y;
-    const double theta = state.pose.theta;
-    const double tx = target.x;
-    const double ty = target.y;
+    const Pose2d pose = poseInchesToMeters(state.pose);
+    const Pose2d goal = poseInchesToMeters(target);
+    const double rx = pose.x;
+    const double ry = pose.y;
+    const double theta = pose.theta;
+    const double tx = goal.x;
+    const double ty = goal.y;
 
     // Travel direction on arrival. Reversing flips it; the front still
     // finishes on target.theta (LemLib's adjusted-heading settle).
     const double approach = config.forwards
-        ? target.theta
-        : mathutil::normalize_angle(target.theta + Robot::PI);
+        ? goal.theta
+        : mathutil::normalize_angle(goal.theta + Robot::PI);
 
     const double dist = std::hypot(tx - rx, ty - ry);
     const bool close = dist < config.close_m;
@@ -91,13 +88,13 @@ ChassisCommand DriftBoomerang::compute(const StateEstimate& state, const Pose2d&
 
     // κ = dφ/ds along the carrot bearing. Positive is a left (CCW) bend.
     double kappa = 0.0;
-    if (!close && carrot_dist > kCarrotFloorM && dist > kCarrotFloorM) {
-        const double rx2 = rx + kProbeM * std::cos(phi);
-        const double ry2 = ry + kProbeM * std::sin(phi);
+    if (!close && carrot_dist > Drift::CARROT_FLOOR_M && dist > Drift::CARROT_FLOOR_M) {
+        const double rx2 = rx + Drift::PROBE_M * std::cos(phi);
+        const double ry2 = ry + Drift::PROBE_M * std::sin(phi);
         double cx2, cy2;
         carrotOf(rx2, ry2, tx, ty, approach, config.lead, cx2, cy2);
         const double phi2 = std::atan2(cy2 - ry2, cx2 - rx2);
-        kappa = mathutil::normalize_angle(phi2 - phi) / kProbeM;
+        kappa = mathutil::normalize_angle(phi2 - phi) / Drift::PROBE_M;
     }
 
     // tan(σ) = v² κ / a_ref. Nose leads a left bend by a positive σ.
@@ -110,7 +107,7 @@ ChassisCommand DriftBoomerang::compute(const StateEstimate& state, const Pose2d&
 
     double psi = mathutil::normalize_angle(phi + sigma);
     if (!config.forwards) psi = mathutil::normalize_angle(psi + Robot::PI);
-    if (close) psi = target.theta;
+    if (close) psi = goal.theta;
     goal_heading_ = psi;
 
     const double along_in = ((cx - rx) * std::cos(theta) + (cy - ry) * std::sin(theta))
@@ -120,7 +117,7 @@ ChassisCommand DriftBoomerang::compute(const StateEstimate& state, const Pose2d&
     const double small_in = Boomerang::Lateral.small_error;
     const double small_deg = Boomerang::Angular.small_error;
     const double heading_to_goal_deg =
-        mathutil::normalize_angle(target.theta - theta) * (180.0 / Robot::PI);
+        mathutil::normalize_angle(goal.theta - theta) * (180.0 / Robot::PI);
     settled_ = (dist / kMetersPerInch) < small_in
             && std::fabs(heading_to_goal_deg) < small_deg;
 

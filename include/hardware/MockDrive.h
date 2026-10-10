@@ -21,6 +21,7 @@
 
 #include "interfaces/IDriveBase.h"
 #include "interfaces/IFeedForward.h"
+#include "hardware/MockDriveParams.h"
 #include <cstdint>
 
 class MockDrive : public IDriveBase {
@@ -29,6 +30,8 @@ public:
                        double max_volts = 12.0, bool scale_battery = false);
 
     void initialize() override;
+    void beginSensorCalibration() override;
+    void waitSensorCalibration() override;
     void calibrateSensors() override;
 
     JoystickData readJoystick() override;
@@ -51,9 +54,36 @@ public:
     void setButtons(const ButtonState& buttons);
     void setBatteryVoltage(double volts);
 
+    // True plant, the pose a perfect localizer would publish. x and y are
+    // inches. theta is radians. v_lin and v_lat are m/s in the body frame
+    // (forward, left). v_ang is rad/s, CCW. Training reads this instead of
+    // the noisy sensor path.
+    struct PlantSnapshot {
+        double x_in = 0;
+        double y_in = 0;
+        double theta = 0;
+        double v_lin = 0;
+        double v_lat = 0;
+        double v_ang = 0;
+        double left_amps = 0;
+        double right_amps = 0;
+    };
+
+    PlantSnapshot plantSnapshot() const;
+
+    // Place the plant. Wheel speeds match v_lin and v_ang. Does not draw a
+    // new sensor-error sample, so a training reset stays deterministic.
+    void setPlant(double x_in, double y_in, double theta,
+                  double v_lin, double v_lat, double v_ang);
+
     // Advance the plant. dt_seconds is the control period (System::DT_SEC).
     // service() calls this and then redraws the field.
     void stepSimulation(double dt_seconds);
+
+    // Runtime plant. Defaults are MockPlant. The tuner writes these; the
+    // firmware build does not call this.
+    void setDynamics(double velocity_tau_sec, double skid_tau_sec,
+                     double side_resistance_ohm, double speed_scale);
 
     void resetSensors();
     void printTelemetry() const;
@@ -69,6 +99,10 @@ private:
     double lat_mps_ = 0.0;   // body frame, positive to the left
     double plant_left_v_ = 0.0, plant_right_v_ = 0.0;
     double left_amps_ = 0.0, right_amps_ = 0.0;
+    double velocity_tau_ = MockPlant::VELOCITY_TAU_SEC;
+    double skid_tau_ = MockPlant::SKID_TAU_SEC;
+    double side_resistance_ = MockPlant::SIDE_RESISTANCE_OHM;
+    double speed_scale_ = MockPlant::SPEED_SCALE;
 
     // Forward-kinematics memory (meters) and simulated IMU.
     double prev_l_ = 0.0, prev_r_ = 0.0;
@@ -100,16 +134,6 @@ private:
     JoystickData joystick_{};
     ButtonState buttons_{};
     SubsystemCommand subsystems_{};
-
-    // First-order lag from commanded voltage to wheel speed.
-    static constexpr double kVelocityTauSec = 0.15;
-    // How fast roller friction bleeds off sideways speed. Larger means the
-    // robot keeps sliding sideways longer after the heading changes.
-    static constexpr double kSkidTauSec = 0.3;
-    // Three V5 motors in parallel per side (~2.5 A stall each).
-    static constexpr double kSideResistanceOhm = 1.6;
-    // 10 ms loop * 3 = 30 ms, next to the distance sensor's 33 ms budget.
-    static constexpr int kRangePeriodTicks = 3;
 
     void applyCurrentLimit(double& left_v, double& right_v, double v_lin, double v_ang) const;
     void ensureSensorScales();

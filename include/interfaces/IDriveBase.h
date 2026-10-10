@@ -18,6 +18,15 @@ public:
 
     // --- Lifecycle ---
     virtual void initialize() = 0;
+
+    // Clear calibration bookkeeping and return. waitSensorCalibration()
+    // performs the blocking IMU reset (about two seconds, 3 s kernel cap).
+    // The robot must stay still until that wait returns. Startup runs the
+    // wait on another task during the clip so this thread can keep going.
+    virtual void beginSensorCalibration() {}
+    virtual void waitSensorCalibration() {}
+
+    // beginSensorCalibration() followed by waitSensorCalibration().
     virtual void calibrateSensors() = 0;
 
     // --- Human input ---

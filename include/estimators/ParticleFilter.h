@@ -19,6 +19,7 @@
 
 #include "core/Types.h"
 #include "core/Specs.h"
+#include "core/Tuning.h"
 #include <cmath>
 #include <cstdint>
 
@@ -30,7 +31,7 @@ struct ParticleFilterConfig {
     // 200 doubles did, around one to two milliseconds, inside the 10 ms
     // brain tick. The sensor sigmas below keep the cloud a centimeter or
     // two wide between wall updates, and 400 samples cover that.
-    int count = 400;                 // clamped to [8, ParticleFilter::kMaxParticles]
+    int count = Particles::COUNT;    // clamped to [Particles::MIN, ParticleFilter::kMaxParticles]
 
     // Translation stddev (m) on this step =
     //   alpha_trans * |along-track| + alpha_trans_rot * |dtheta|
@@ -72,14 +73,14 @@ struct ParticleFilterConfig {
     double sigma_heading = Robot::Imu::SCALE_SIGMA * (2.0 * Robot::PI);
 
     // Resample when Neff < resample_ratio * count. 0 disables resampling.
-    double resample_ratio = 0.2;
+    double resample_ratio = Particles::RESAMPLE_RATIO;
 
     uint32_t seed = 1;
 };
 
 class ParticleFilter {
 public:
-    static constexpr int kMaxParticles = 3000;
+    static constexpr int kMaxParticles = Particles::MAX;
 
     ParticleFilter();
     explicit ParticleFilter(const ParticleFilterConfig& cfg);

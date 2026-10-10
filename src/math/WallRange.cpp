@@ -1,6 +1,7 @@
 /* WallRange.cpp -- ray cast from a chassis-mounted distance sensor to the field wall. */
 #include "math/WallRange.h"
 #include "core/Specs.h"
+#include "core/Tuning.h"
 #include "math/MathUtils.h"
 #include <cmath>
 
@@ -74,19 +75,19 @@ T beamLength(T x, T y, T cos_th, T sin_th, T mount_x, T mount_y, T cos_yaw, T si
 RangeSolve refine(double theta, const DistanceReading* distance, int count,
                   double x, double y) {
     const double H = Robot::Range::FIELD_HALF_M;
-    const double margin = 0.05;
+    const double margin = WallSolve::FIELD_MARGIN_M;
     RangeSolve sol;
     sol.x = x;
     sol.y = y;
 
-    for (int iter = 0; iter < 8; ++iter) {
+    for (int iter = 0; iter < WallSolve::ITERATIONS; ++iter) {
         double a00 = 0, a01 = 0, a11 = 0, b0 = 0, b1 = 0;
         for (int i = 0; i < count; ++i) {
             if (!distance[i].valid) continue;
             const WallHit hit = wallrange::predictWallRange(Pose2d{sol.x, sol.y, theta}, i);
             if (!hit.hit) continue;
             const double innov = distance[i].range_m - hit.range_m;
-            if (iter > 1 && std::fabs(innov) > 0.40) continue;
+            if (iter > 1 && std::fabs(innov) > WallSolve::INNOV_GATE_M) continue;
             const double jx = hit.hx;
             const double jy = hit.hy;
             if (jx * jx + jy * jy < 1e-8) continue;

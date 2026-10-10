@@ -13,6 +13,7 @@
 #include "math/MathUtils.h"
 #include "math/WallRange.h"
 #include "core/Specs.h"
+#include "core/Tuning.h"
 
 class OdometryEstimator : public IEstimator {
 public:
@@ -25,8 +26,9 @@ public:
     }
 
     void overridePose(const Pose2d& pose) override {
-        odom_.setPose(pose);
-        prev_theta_ = pose.theta;   // keep display delta continuous
+        const Pose2d stored = poseInchesToMeters(pose);
+        odom_.setPose(stored);
+        prev_theta_ = stored.theta;   // keep display delta continuous
         range_phase_ = 0;
     }
 
@@ -38,7 +40,7 @@ public:
         if (range_phase_ == 0) {
             wallrange::nudgePosition(odom_.pose.x, odom_.pose.y, odom_.pose.theta,
                                      sensors.distance, kDistanceChannels,
-                                     kNudgeGain, kNudgeStepM, kRangeGateM);
+                                     WallNudge::ODOM_GAIN, WallNudge::STEP_M, WallNudge::GATE_M);
         }
         range_phase_ = (range_phase_ + 1) % System::RANGE_STRIDE;
         // Unwrapped heading accumulator (display only).
@@ -51,7 +53,7 @@ public:
 
     StateEstimate getState() const override {
         StateEstimate s;
-        s.pose = odom_.pose;
+        s.pose = poseMetersToInches(odom_.pose);
         s.v_lin = v_lin_;
         s.v_ang = v_ang_;
         return s;
@@ -60,10 +62,6 @@ public:
     double getTotalHeading() const override { return total_heading_; }
 
 private:
-    static constexpr double kNudgeGain = 0.15; // fraction of the wall step
-    static constexpr double kNudgeStepM = 0.04;
-    static constexpr double kRangeGateM = 0.20;
-
     Odometry odom_;
     double total_heading_ = 0.0;
     double prev_theta_ = 0.0;

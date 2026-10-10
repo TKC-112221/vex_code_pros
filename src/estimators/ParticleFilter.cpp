@@ -4,6 +4,7 @@
  */
 #include "estimators/ParticleFilter.h"
 #include "core/Specs.h"
+#include "core/Tuning.h"
 #include "math/MathUtils.h"
 #include <cmath>
 
@@ -11,7 +12,7 @@ namespace {
 
 // -0.5 * (4 sigma)^2. A fix farther than this from every particle is treated
 // as a kidnapped-robot measurement and half the cloud is reseeded on it.
-constexpr float kKidnapLogLik = -8.0f;
+constexpr float kKidnapLogLik = static_cast<float>(RangeLik::KIDNAP_LOG_LIK);
 constexpr float kTwoPi = 6.283185307179586f;
 constexpr float kPi = 3.141592653589793f;
 
@@ -26,7 +27,7 @@ float wrapAngle(float angle) {
 ParticleFilter::ParticleFilter() : ParticleFilter(ParticleFilterConfig{}) {}
 
 ParticleFilter::ParticleFilter(const ParticleFilterConfig& cfg) : cfg_(cfg) {
-    if (cfg_.count < 8) cfg_.count = 8;
+    if (cfg_.count < Particles::MIN) cfg_.count = Particles::MIN;
     if (cfg_.count > kMaxParticles) cfg_.count = kMaxParticles;
     if (!(cfg_.resample_ratio >= 0.0)) cfg_.resample_ratio = 0.0;
     rng_ = cfg_.seed ? static_cast<uint64_t>(cfg_.seed) : 1ull;
@@ -140,7 +141,7 @@ void ParticleFilter::correctRanges(const DistanceReading* distance, int count) {
 
     // Log-likelihood floor, -0.5 * (5 sigma)^2. A residual past that is one
     // outlier (a blocked beam or a miss) and cannot wipe the particle.
-    constexpr float kMaxPenalty = -12.5f;
+    constexpr float kMaxPenalty = static_cast<float>(RangeLik::MAX_PENALTY);
 
     // Heading is the IMU, shared by the cloud. One sine/cosine, then each
     // beam is a wall plane: range = cx * x + cy * y + c0. That is the ray

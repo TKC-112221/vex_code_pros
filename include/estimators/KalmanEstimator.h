@@ -11,14 +11,15 @@
 #include "math/ExtendedKalmanFilter.h"
 #include "math/WallRange.h"
 #include "core/Specs.h"
+#include "core/Tuning.h"
 #include <cmath>
 
 class KalmanEstimator : public IEstimator {
 public:
     void initialize() override {
         ekf_.init(System::DT_SEC,
-                  /*q_pos*/1e-5, /*q_vel*/1e-4, /*q_acc*/0.1,
-                  /*r_pos*/0.002 * 0.002, /*r_vel*/0.04 * 0.04, /*r_acc_cmd*/2.0 * 2.0);
+                  Ekf::Q_POS, Ekf::Q_VEL, Ekf::Q_ACC,
+                  Ekf::R_POS, Ekf::R_VEL, Ekf::R_ACC_CMD);
     }
 
     void reset() override {
@@ -30,9 +31,10 @@ public:
     }
 
     void overridePose(const Pose2d& pose) override {
-        odom_.setPose(pose);
-        ekf_.reset(pose.x, pose.y, pose.theta, 0.0, 0.0);
-        prev_theta_ = pose.theta;
+        const Pose2d stored = poseInchesToMeters(pose);
+        odom_.setPose(stored);
+        ekf_.reset(stored.x, stored.y, stored.theta, 0.0, 0.0);
+        prev_theta_ = stored.theta;
         range_phase_ = 0;
     }
 
@@ -60,7 +62,7 @@ public:
     StateEstimate getState() const override {
         StateEstimate s;
         double px, py, pth; ekf_.get_pose_est(px, py, pth);
-        s.pose = Pose2d{px, py, pth};
+        s.pose = poseMetersToInches(Pose2d{px, py, pth});
         s.v_lin = ekf_.get_v_est();
         s.v_ang = ekf_.get_omega_est();
         return s;
@@ -88,10 +90,10 @@ private:
         const double r = (nvar > 0) ? (var_acc / static_cast<double>(nvar))
                                     : (fallback * fallback);
         const RangeSolve sol = wallrange::solveRanges(pth, distance, Robot::Range::COUNT);
-        if (sol.ok && sol.mae_m < 0.08) {
+        if (sol.ok && sol.mae_m < Ekf::WALL_FIX_MAE_M) {
             const double dx = sol.x - px;
             const double dy = sol.y - py;
-            if (dx * dx + dy * dy > 0.05 * 0.05) {
+            if (dx * dx + dy * dy > Ekf::WALL_FIX_STEP_M * Ekf::WALL_FIX_STEP_M) {
                 double H[ExtendedKalmanFilter::N] = {};
                 H[0] = 1.0;
                 ekf_.update_linear(H, dx, r);
@@ -110,7 +112,7 @@ private:
             if (!hit.hit) continue;
             const double innov = distance[i].range_m - hit.range_m;
             const double sigma = Robot::rangeSigmaM(distance[i].range_m, distance[i].confidence);
-            if (std::fabs(innov) > 3.0 * sigma) continue;
+            if (std::fabs(innov) > Ekf::WALL_GATE_SIGMAS * sigma) continue;
             double H[ExtendedKalmanFilter::N] = {};
             H[0] = hit.hx;
             H[1] = hit.hy;

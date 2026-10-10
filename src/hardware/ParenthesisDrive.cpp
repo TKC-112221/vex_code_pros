@@ -69,6 +69,8 @@ ChassisObservation ParenthesisDrive::readObservation(double prev_heading_rad) {
     o.right_vel_rpm = side_r_->get_actual_velocity();
     o.left_current_amps  = side_l_->get_current_draw() / 1000.0;
     o.right_current_amps = side_r_->get_current_draw() / 1000.0;
+    o.left_temp_c  = side_l_->get_temperature();
+    o.right_temp_c = side_r_->get_temperature();
     return o;
 }
 

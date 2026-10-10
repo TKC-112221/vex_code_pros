@@ -46,7 +46,25 @@ SubsystemCommand MacroController::processSubsystems(const ButtonState& btn, uint
     prev_dw_ = (l1 && l2);
     prev_up_ = (r1 && r2);
 
-    return mixSubsystems(r1, r2, l1, l2, g_state_, b_state_, bitmask);
+    captureIntent(r1, r2, l1, l2);
+    // Live driver control speaks SubsystemIntent. The bitmask stays on the
+    // command so a recording can still be replayed by decodeRecorded.
+    SubsystemCommand sub = intent_.toCommand();
+    sub.raw_bitmask = bitmask;
+    return sub;
+}
+
+void MacroController::captureIntent(bool r1, bool r2, bool l1, bool l2) {
+    if (r1 && !r2) intent_.intake = IntakeState::In;
+    else if (r2 && !r1) intent_.intake = IntakeState::Out;
+    else intent_.intake = IntakeState::Idle;
+
+    if (l1 && !l2) intent_.shooter = ShooterState::Spin;
+    else if (l2 && !l1) intent_.shooter = ShooterState::Reverse;
+    else intent_.shooter = ShooterState::Idle;
+
+    intent_.pneumatic_g = g_state_;
+    intent_.pneumatic_b = b_state_;
 }
 
 SubsystemCommand MacroController::decodeRecorded(uint8_t bitmask) const {

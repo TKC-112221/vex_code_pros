@@ -19,4 +19,8 @@ public:
     virtual SubsystemCommand processSubsystems(const ButtonState& btn, uint32_t now_ms) = 0;
     // Decode a recorded bitmask into a subsystem command (replay path).
     virtual SubsystemCommand decodeRecorded(uint8_t bitmask) const = 0;
+
+    // Last live decode, as the shared mechanism mode. Recorded replay does
+    // not update this; it applies the bitmask mix directly.
+    virtual SubsystemIntent subsystemIntent() const { return {}; }
 };

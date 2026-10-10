@@ -1,12 +1,16 @@
 #include "logic/UserInputOverride.h"
+#include "control/DriftFollower.h"
+#include "control/DrivePolicy.h"
+#include "config/Settings.h"
 #include "logic/DriftCurveOverride.h"
 #include "math/TargetPlane.h"
-#include "core/Gains.h"
+#include "core/Tuning.h"
 #include <cmath>
 
 namespace {
 
-    DriftCurve g_nav;
+    // DriftCurve g_nav;
+    DriftFollower g_nav;
     bool g_prev_a = false;
     bool g_have_prev = false;
     bool g_seen_behind = false;
@@ -34,7 +38,7 @@ namespace {
 bool g_drift_curve_on = false;
 bool g_drift_curve_abort = false;
 
-DriftCurve& driftCurve() { return g_nav; }
+DriftFollower& driftCurve() { return g_nav; }
 
 void driftCurveOverridePoll(const ButtonState& buttons,
                             const JoystickData& raw_sticks,
@@ -45,16 +49,29 @@ void driftCurveOverridePoll(const ButtonState& buttons,
 
     if (start) {
         g_nav.reset();
-        driftCurve().target = {0, 0, 0, 0, 4.0, 0.3, true};
+        MotionPose goal{metersToInches(Practice::GOAL_X_M), metersToInches(Practice::GOAL_Y_M),
+                        Practice::GOAL_HEADING_RAD, Practice::EXIT_SPEED_MPS, 0.0};
+        PathConstraints limits;
+        limits.max_accel_mps2 = Practice::MAX_ACCEL_MPS2;
+        limits.line_length_in = metersToInches(Practice::LINE_LENGTH_M);
+        driftCurve().config.forwards = goal.v >= 0.0;
+        driftCurve().target = DriftCurveTarget::fromMotion(goal, limits);
         clearPlaneWatch();
         g_drift_curve_on = true;
     }
     if (g_drift_curve_on && mode != RobotMode::IDLE) g_drift_curve_abort = true;
-    if (g_drift_curve_on && sticksActive(raw_sticks)) g_drift_curve_abort = true;
+    // Holding A keeps a drive that was already in progress from cancelling
+    // the curve. Sticks abort only after A is released.
+    if (g_drift_curve_on && sticksActive(raw_sticks) && !buttons.a) {
+        g_drift_curve_abort = true;
+    }
 }
 
 CommandVector driftCurveOverride(const StateEstimate& estimate,
                                  const IFeedForward* model) {
+    if (Settings::ControlToggles::USE_DRIVE_POLICY) {
+        return DrivePolicy::command(estimate, g_nav.target);
+    }
     g_nav.bindFeedforward(model);
     return CommandVector::fromChassis(g_nav.compute(estimate));
 }
@@ -80,8 +97,9 @@ double planeNormal(const DriftCurveTarget& target, const Pose2d& from) {
 
 } // namespace
 
-int driftCurveOverridePath(const Pose2d& from, Pose2d* out, int cap) {
-    return g_nav.samplePath(from, out, cap);
+int driftCurveOverridePath(const Pose2d& from, Pose2d* out, int cap,
+                           double v_lin, double v_ang) {
+    return g_nav.samplePath(from, out, cap, v_lin, v_ang);
 }
 
 
@@ -131,7 +149,8 @@ OverrideResult userInputOverride(const ChassisObservation& /*sensor*/,
     return out;
 }
 
-int userInputOverridePath(const Pose2d& from, Pose2d* out, int cap) {
+int userInputOverridePath(const Pose2d& from, Pose2d* out, int cap,
+                          double v_lin, double v_ang) {
     if (g_drift_curve_abort || !g_drift_curve_on || out == nullptr || cap < 2) return 0;
-    return driftCurveOverridePath(from, out, cap);
+    return driftCurveOverridePath(from, out, cap, v_lin, v_ang);
 }

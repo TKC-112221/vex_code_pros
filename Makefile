@@ -21,11 +21,11 @@ USE_PACKAGE:=1
 
 # Add libraries you do not wish to include in the cold image here
 # EXCLUDE_COLD_LIBRARIES:= $(FWDIR)/your_library.a
-EXCLUDE_COLD_LIBRARIES:= 
+EXCLUDE_COLD_LIBRARIES:=
 
 # Set this to 1 to add additional rules to compile your project as a PROS library template
 IS_LIBRARY:=0
-# TODO: CHANGE THIS! 
+# TODO: CHANGE THIS!
 # Be sure that your header files are in the include directory inside of a folder with the
 # same name as what you set LIBNAME to below.
 LIBNAME:=libbest
@@ -54,7 +54,7 @@ EXCLUDE_SRCDIRS=$(SRCDIR)/host
 # The V5 image is `make quick` and does not define ROBOT_HOST.
 HOST_CXX ?= clang++
 HOST_CXXFLAGS := --std=gnu++26 -I./include -D_POSIX_THREADS -D_UNIX98_THREAD_MUTEX_ATTRIBUTES -D_POSIX_TIMERS -D_POSIX_MONOTONIC_CLOCK -D_USE_MATH_DEFINES -D_PROS_KERNEL_SUPPRESS_LLEMU_WARNING -DROBOT_HOST=1 -g -Os
-HOST_SRCS := $(wildcard src/main.cpp src/control/*.cpp src/estimators/*.cpp src/logic/*.cpp src/math/*.cpp src/trajectory/*.cpp src/platform/*.cpp src/host/*.cpp)
+HOST_SRCS := $(wildcard src/main.cpp src/control/*.cpp src/estimators/*.cpp src/logic/*.cpp src/math/*.cpp src/trajectory/*.cpp src/platform/*.cpp src/host/*.cpp src/auton/*.cpp)
 HOST_LIBS := -luser32 -lgdi32
 
 .PHONY: host

@@ -8,6 +8,7 @@
 #include "config/Ports.h"
 #include "config/Settings.h"
 #include "core/Specs.h"
+#include "core/Tuning.h"
 #include "math/MathUtils.h"
 #include <algorithm>
 #include <cmath>
@@ -53,12 +54,19 @@ void XDrive::initialize() {
     bl_->set_brake_mode(pros::MotorBrake::coast); br_->set_brake_mode(pros::MotorBrake::coast);
 }
 
-void XDrive::calibrateSensors() {
+void XDrive::beginSensorCalibration() {
     imu_offset_ = 0.0;
-    if (!Settings::ControlToggles::IMU_FALLBACK) {
-        imu_->reset();
-        while (imu_->is_calibrating()) pros::delay(10);
-    }
+}
+
+void XDrive::waitSensorCalibration() {
+    if (Settings::ControlToggles::IMU_FALLBACK) return;
+    // Same as TankDrive: one blocking reset, with the kernel's 3 s timeout.
+    imu_->reset(true);
+}
+
+void XDrive::calibrateSensors() {
+    beginSensorCalibration();
+    waitSensorCalibration();
 }
 
 void XDrive::stop() {
@@ -68,10 +76,10 @@ void XDrive::stop() {
 
 JoystickData XDrive::readJoystick() {
     JoystickData joy;
-    joy.left_y  =  pilot_->get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y)  / 127.0;
-    joy.left_x  =  pilot_->get_analog(pros::E_CONTROLLER_ANALOG_LEFT_X)  / 127.0;
-    joy.right_y =  pilot_->get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_Y) / 127.0;
-    joy.right_x =  pilot_->get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_X) / 127.0;
+    joy.left_y  =  pilot_->get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y)  / Controller::FULL_SCALE;
+    joy.left_x  =  pilot_->get_analog(pros::E_CONTROLLER_ANALOG_LEFT_X)  / Controller::FULL_SCALE;
+    joy.right_y =  pilot_->get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_Y) / Controller::FULL_SCALE;
+    joy.right_x =  pilot_->get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_X) / Controller::FULL_SCALE;
     return joy;
 }
 
@@ -101,7 +109,7 @@ void XDrive::alignHeadingTo(double target_rad) {
 double XDrive::batteryScale() const {
     if (!use_battery_scaling_) return 1.0;
     double batt = pros::battery::get_voltage() / 1000.0;
-    return (batt > 5.0) ? (System::MAX_VOLTS / batt) : 1.0;
+    return (batt > Controls::BATTERY_VALID_V) ? (System::MAX_VOLTS / batt) : 1.0;
 }
 
 double XDrive::clampScale(const double* v, int n, double max_v) {
@@ -116,13 +124,11 @@ void XDrive::fillImuChannels(double prev_heading_rad, ChassisObservation& o) con
         // Wheel-derived heading isn't well-posed for a holonomic base; hold last.
         o.heading_rad = prev_heading_rad;
         o.v_ang = 0.0;
-        o.imu_heading_deg = prev_heading_rad * (180.0 / M_PI);
         o.imu_rate_z_dps = 0.0;
         o.imu_accel_x = 0.0; o.imu_accel_y = 0.0;
     } else {
         o.heading_rad = -imu_->get_rotation() * (M_PI / 180.0) + imu_offset_;
         o.v_ang = -imu_->get_gyro_rate().z * (M_PI / 180.0);
-        o.imu_heading_deg = imu_->get_rotation();
         o.imu_rate_z_dps = imu_->get_gyro_rate().z;
         o.imu_accel_x = imu_->get_accel().x;
         o.imu_accel_y = imu_->get_accel().y;
@@ -158,6 +164,8 @@ ChassisObservation XDrive::readObservation(double prev_heading_rad) {
     o.right_vel_rpm = (rfr + rbr) / 2.0;
     o.left_current_amps  = (fl_->get_current_draw() + bl_->get_current_draw()) / 2000.0;
     o.right_current_amps = (fr_->get_current_draw() + br_->get_current_draw()) / 2000.0;
+    o.left_temp_c  = (fl_->get_temperature() + bl_->get_temperature()) / 2.0;
+    o.right_temp_c = (fr_->get_temperature() + br_->get_temperature()) / 2.0;
     return o;
 }
 

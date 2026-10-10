@@ -12,6 +12,7 @@
 
 class Odometry {
 public:
+    // Meters. OdometryEstimator converts to inches when it publishes.
     Pose2d pose;
 
     // forward_delta: meters travelled along heading since last call

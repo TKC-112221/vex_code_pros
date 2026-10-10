@@ -1,4 +1,4 @@
 #include "logic/DriftCurveOverride.h"
-#include "core/Gains.h"
+#include "core/Tuning.h"
 
 #include <cmath>
