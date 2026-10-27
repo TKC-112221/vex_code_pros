@@ -3,6 +3,8 @@
  * Brain LLEMU is a label update (LVGL draws on its own task), so all three
  * lines are written on the pipeline. The controller link is the slow call:
  * one line per flush, at least 50 ms apart, and only when that line changed.
+ * On the V5 that flush runs from the brain UI task. On the host it stays
+ * inline, because the stand-in print does not block.
  * ------------------------------------------------------------------------- */
 #include "logic/UIManager.h"
 #include <cstdio>
@@ -16,8 +18,13 @@ constexpr uint32_t kControllerLineMs = 50;
 
 UIManager::UIManager() {
     ctrl_ = new pros::Controller(pros::E_CONTROLLER_MASTER);
-    // Host paints LLEMU on the field window. The V5 starts LLEMU here.
+    // Host paints LLEMU text on the field window. The V5 brain is the
+    // autonomous selector, so LLEMU is not started there.
+#if defined(ROBOT_HOST)
     brain_ok_ = pros::lcd::initialize();
+#else
+    brain_ok_ = false;
+#endif
 }
 
 void UIManager::publishLines(const char* l0, const char* l1, const char* l2) {
@@ -25,6 +32,12 @@ void UIManager::publishLines(const char* l0, const char* l1, const char* l2) {
     std::snprintf(lines_[1], sizeof(lines_[1]), "%s", l1 != nullptr ? l1 : "");
     std::snprintf(lines_[2], sizeof(lines_[2]), "%s", l2 != nullptr ? l2 : "");
     writeBrain();
+#if defined(ROBOT_HOST)
+    flushControllerLine();
+#endif
+}
+
+void UIManager::serviceController() {
     flushControllerLine();
 }
 
@@ -33,10 +46,12 @@ void UIManager::setBrainUpdates(bool on) {
 }
 
 void UIManager::writeBrain() {
+#if defined(ROBOT_HOST)
     if (!brain_ok_ || !brain_updates_.load()) return;
     pros::lcd::print(0, "%s", lines_[0]);
     pros::lcd::print(1, "%s", lines_[1]);
     pros::lcd::print(2, "%s", lines_[2]);
+#endif
 }
 
 void UIManager::flushControllerLine() {
@@ -119,7 +134,7 @@ static const char* modeName(RobotMode m) {
 }
 
 void UIManager::updateDisplay(RobotMode mode, const Pose2d& pose, double total_heading,
-                              int frame_count) {
+                              int frame_count, bool recording) {
     const uint32_t now = pros::millis();
     if (now - last_display_ms_ >= kStatusPeriodMs) {
         last_display_ms_ = now;
@@ -133,6 +148,8 @@ void UIManager::updateDisplay(RobotMode mode, const Pose2d& pose, double total_h
             std::snprintf(lines_[2], sizeof(lines_[2]), "-- ODOM DEBUG --");
         } else if (mode == RobotMode::RECORDING) {
             std::snprintf(lines_[2], sizeof(lines_[2]), "REC: %d", frame_count);
+        } else if (recording) {
+            std::snprintf(lines_[2], sizeof(lines_[2]), "CMD REC: %d", frame_count);
         } else if (mode == RobotMode::IDLE) {
             if (frame_count > 0)
                 std::snprintf(lines_[2], sizeof(lines_[2]), "Save Ready: %d", frame_count);
@@ -144,7 +161,9 @@ void UIManager::updateDisplay(RobotMode mode, const Pose2d& pose, double total_h
         writeBrain();
     }
 
-    // Runs on the ticks that did not rebuild text, so a dirty line still
-    // goes out 50 ms after the previous one.
+    // Host only. The V5 control tick must not block in controller_print;
+    // brain_ui_task calls serviceController().
+#if defined(ROBOT_HOST)
     flushControllerLine();
+#endif
 }

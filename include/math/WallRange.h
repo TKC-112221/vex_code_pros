@@ -2,7 +2,9 @@
 /* ---------------------------------------------------------------------------
  * WallRange  --  expected VEX distance-sensor readings against the field wall.
  *
- * The field is an axis-aligned square centered on the origin (Robot::Range).
+ * The field is an axis-aligned 12 ft square. Its origin is the center of
+ * the bottom edge (Robot::Range): +x toward the right wall, +y toward the
+ * far wall.
  * Each beam is Robot::Range::MOUNT in the chassis frame. predictWallRange is
  * the measurement model shared by the particle filter, the EKF, and MockDrive.
  * solveRanges recovers x/y from ranges when heading is already known.

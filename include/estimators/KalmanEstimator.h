@@ -20,11 +20,12 @@ public:
         ekf_.init(System::DT_SEC,
                   Ekf::Q_POS, Ekf::Q_VEL, Ekf::Q_ACC,
                   Ekf::R_POS, Ekf::R_VEL, Ekf::R_ACC_CMD);
+        reset();
     }
 
     void reset() override {
-        odom_.setPose(Pose2d{});
-        ekf_.reset();
+        odom_.setPose(Pose2d{Robot::Range::CENTER_X_M, Robot::Range::CENTER_Y_M, 0.0});
+        ekf_.reset(Robot::Range::CENTER_X_M, Robot::Range::CENTER_Y_M, 0.0, 0.0, 0.0);
         total_heading_ = 0.0;
         prev_theta_ = 0.0;
         range_phase_ = 0;

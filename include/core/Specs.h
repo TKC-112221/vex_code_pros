@@ -15,6 +15,10 @@ namespace Robot {
         constexpr double WHEEL_DIAMETER_M  = WHEEL_DIAMETER_IN * 0.0254;
         constexpr double GEAR_RATIO        = 48.0 / 36.0;
         constexpr double TRACK_WIDTH_M     = 0.27051;
+        // Bumper rectangle. The field view draws it, and the contact layer
+        // pushes on its corners. Width is the track, so a corner sits on a
+        // wheel centerline rather than outboard of the wheel.
+        constexpr double BODY_LENGTH_M     = 0.38;
     }
 
     namespace Drive {
@@ -22,18 +26,14 @@ namespace Robot {
         constexpr double VELOCITY_EFFICIENCY = 0.90;
     }
 
-    // XY of Field::Point::Align. Heading is not stored; the boomerang caller
-    // passes it when the drive starts.
-    namespace Align {
-        constexpr double POINT_X_IN = -11.5;
-        constexpr double POINT_Y_IN = -2.0;
-    }
     constexpr double ODOM_IMU_WEIGHT = 1.0;
 
     // Four outward-facing distance sensors. Chassis frame: x forward, y left,
     // yaw CCW from forward. D1 front, D2 right, D3 rear, D4 left.
     // Edit MOUNT when the sensors move on the robot. Field walls are the
-    // perimeter of a 12 ft field centered on the origin.
+    // perimeter of a 12 ft square. The origin is the center of the bottom
+    // edge: +x toward the right wall, +y toward the far wall. Heading is
+    // unchanged, 0 along +x and counterclockwise positive.
     //
     // VEX publishes the accuracy as about ±15 mm below 200 mm and ±5% above
     // that, over 20–2000 mm (VEXcode distance-sensor API and the V5 knowledge
@@ -43,7 +43,19 @@ namespace Robot {
     // default timing budget).
     namespace Range {
         constexpr int COUNT = 4;
-        constexpr double FIELD_HALF_M = 6.0 * 0.3048;
+        constexpr double FIELD_SIZE_M = 12.0 * 0.3048;
+        constexpr double FIELD_HALF_M = 0.5 * FIELD_SIZE_M;
+        constexpr double FIELD_X_MIN_M = -FIELD_HALF_M;
+        constexpr double FIELD_X_MAX_M = FIELD_HALF_M;
+        constexpr double FIELD_Y_MIN_M = 0.0;
+        constexpr double FIELD_Y_MAX_M = FIELD_SIZE_M;
+        // Geometric center of the field. This is where (0, 0) used to be.
+        constexpr double CENTER_X_M = 0.0;
+        constexpr double CENTER_Y_M = FIELD_HALF_M;
+        constexpr double FIELD_SIZE_IN = 12.0 * 12.0;
+        constexpr double FIELD_HALF_IN = 0.5 * FIELD_SIZE_IN;
+        constexpr double CENTER_X_IN = 0.0;
+        constexpr double CENTER_Y_IN = FIELD_HALF_IN;
         constexpr double MIN_M = 0.020;
         constexpr double MAX_M = 2.000;
         constexpr double NEAR_M = 0.200;
@@ -58,6 +70,18 @@ namespace Robot {
             {-0.16,  0.00,  PI },        // D3 rear
             { 0.00,  0.14,  PI / 2.0 },  // D4 left
         };
+    }
+
+    // Keep a pose center inside the field, inset_m in from each wall.
+    inline void clampFieldMeters(double& x, double& y, double inset_m) {
+        const double x_lo = Range::FIELD_X_MIN_M + inset_m;
+        const double x_hi = Range::FIELD_X_MAX_M - inset_m;
+        const double y_lo = Range::FIELD_Y_MIN_M + inset_m;
+        const double y_hi = Range::FIELD_Y_MAX_M - inset_m;
+        if (x > x_hi) x = x_hi;
+        if (x < x_lo) x = x_lo;
+        if (y > y_hi) y = y_hi;
+        if (y < y_lo) y = y_lo;
     }
 
     // Published accuracy, used as the 1-sigma range error. Past 200 mm a

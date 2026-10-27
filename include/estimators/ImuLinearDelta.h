@@ -1,23 +1,24 @@
 #pragma once
 /* ---------------------------------------------------------------------------
- * ImuLinearDelta  --  chassis travel from the inertial accelerometer.
+ * ImuLinearDelta  --  chassis travel for one localization sample.
  *
- * The V5 inertial sensor reports specific force in G, in the chassis frame
- * (x forward along the sensor arrow, y to the left) when it is mounted flat.
- * apply() turns one sample into forward_delta and strafe_delta, in meters,
- * and leaves the wheel-derived velocity channels alone. Every estimator reads
- * those two deltas, so this is the linear step for all of them.
+ * Forward travel is the wheel-encoder delta already on the observation.
+ * That distance has already happened, so the step does not wait on the
+ * stick. Sideways travel is the omni skid, the same discrete solution the
+ * plant integrates:
  *
- * Velocity is kept in the chassis frame. Yaw rate is crossed in, so a robot
- * that is moving forward and then turns carries that speed into strafe
- * instead of forgetting it. Bias is learned only while the wheels, the gyro,
- * and the accelerometer all say the robot is sitting still, so a push the
- * wheels miss is still integrated.
+ *   d v_lat / dt = -ω v_fwd - v_lat / τ
+ *
+ * ω is the gyro rate and v_fwd is this tick's encoder speed. τ is the
+ * plant's skid time constant. Every estimator reads the two deltas.
+ *
+ * Walls, a bumper snap, and the goal orbit are not part of this step.
+ * LocalizationOverride rewrites the sample after apply().
  * ------------------------------------------------------------------------- */
 
 #include "core/Types.h"
 #include "core/Specs.h"
-#include "core/Tuning.h"
+#include "hardware/MockDriveParams.h"
 #include <cmath>
 
 class ImuLinearDelta {
@@ -25,61 +26,46 @@ public:
     void reset() {
         v_fwd_ = 0.0;
         v_lat_ = 0.0;
-        bias_x_ = 0.0;
-        bias_y_ = 0.0;
     }
 
     double forwardVelocity() const { return v_fwd_; }
     double lateralVelocity() const { return v_lat_; }
 
-    // use_accel is false in IMU fallback: the wheel deltas already on obs stay.
-    void apply(ChassisObservation& obs, double dt_sec, bool use_accel) {
-        if (!use_accel || !(dt_sec > 0.0)) {
+    // obs.forward_delta stays the encoder distance. strafe_delta becomes
+    // the skid over this same interval.
+    void apply(ChassisObservation& obs, double dt_sec) {
+        if (!(dt_sec > 0.0) || !std::isfinite(dt_sec)) {
             obs.v_inertial_fwd = v_fwd_;
             obs.v_inertial_lat = v_lat_;
             return;
         }
-        if (!std::isfinite(obs.imu_accel_x) || !std::isfinite(obs.imu_accel_y)) {
-            obs.v_inertial_fwd = v_fwd_;
-            obs.v_inertial_lat = v_lat_;
-            return;
-        }
-        if (std::fabs(obs.imu_accel_x) > ImuBias::SATURATION_G
-            || std::fabs(obs.imu_accel_y) > ImuBias::SATURATION_G) {
-            obs.v_inertial_fwd = v_fwd_;
-            obs.v_inertial_lat = v_lat_;
-            return;
-        }
+        double forward = obs.forward_delta;
+        if (!std::isfinite(forward)) forward = 0.0;
+        obs.forward_delta = forward;
 
-        const double ax_g = obs.imu_accel_x - bias_x_;
-        const double ay_g = obs.imu_accel_y - bias_y_;
-        const bool wheels_still = std::fabs(obs.v_lin) < ImuBias::STILL_LIN_MPS
-            && std::fabs(obs.v_ang) < ImuBias::STILL_ANG_RAD_S;
-        const bool accel_still = (ax_g * ax_g + ay_g * ay_g)
-            < (ImuBias::STILL_ACCEL_G * ImuBias::STILL_ACCEL_G);
-        if (wheels_still && accel_still) {
-            const double k = dt_sec / ImuBias::BIAS_TAU_SEC;
-            bias_x_ += (obs.imu_accel_x - bias_x_) * k;
-            bias_y_ += (obs.imu_accel_y - bias_y_) * k;
-            const double bleed = std::exp(-dt_sec / ImuBias::COAST_TAU_SEC);
-            v_fwd_ *= bleed;
-            v_lat_ *= bleed;
-            obs.forward_delta = 0.0;
-            obs.strafe_delta = 0.0;
-            obs.v_inertial_fwd = v_fwd_;
-            obs.v_inertial_lat = v_lat_;
-            return;
+        const double v_wheel = forward / dt_sec;
+        const double omega = std::isfinite(obs.v_ang) ? obs.v_ang : 0.0;
+        const double tau = MockPlant::SKID_TAU_SEC;
+        const double limit = Robot::MAX_VEL_LIN * MockPlant::SPEED_SCALE;
+        double v_lat = 0.0;
+        if (tau > 1.0e-4) {
+            const double decay = std::exp(-dt_sec / tau);
+            v_lat = v_lat_ * decay + (-omega * v_wheel) * tau * (1.0 - decay);
+            if (v_lat > limit) v_lat = limit;
+            if (v_lat < -limit) v_lat = -limit;
         }
+        obs.strafe_delta = 0.5 * (v_lat_ + v_lat) * dt_sec;
+        v_fwd_ = v_wheel;
+        v_lat_ = v_lat;
+        obs.v_inertial_fwd = v_fwd_;
+        obs.v_inertial_lat = v_lat_;
+    }
 
-        const double ax = (obs.imu_accel_x - bias_x_) * Robot::G_MPS2;
-        const double ay = (obs.imu_accel_y - bias_y_) * Robot::G_MPS2;
-        const double w = obs.v_ang;
-        const double vf = v_fwd_ + (ax + w * v_lat_) * dt_sec;
-        const double vl = v_lat_ + (ay - w * v_fwd_) * dt_sec;
-        obs.forward_delta = 0.5 * (v_fwd_ + vf) * dt_sec;
-        obs.strafe_delta = 0.5 * (v_lat_ + vl) * dt_sec;
-        v_fwd_ = vf;
-        v_lat_ = vl;
+    // Replace the integrated linear velocity. LocalizationOverride uses
+    // this when a wall, a bumper, or a goal orbit keeps the sample.
+    void setLinear(double v_fwd, double v_lat, ChassisObservation& obs) {
+        v_fwd_ = v_fwd;
+        v_lat_ = v_lat;
         obs.v_inertial_fwd = v_fwd_;
         obs.v_inertial_lat = v_lat_;
     }
@@ -87,6 +73,4 @@ public:
 private:
     double v_fwd_ = 0.0;
     double v_lat_ = 0.0;
-    double bias_x_ = 0.0;   // G
-    double bias_y_ = 0.0;
 };

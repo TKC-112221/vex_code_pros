@@ -118,15 +118,20 @@
  * so the outward slide brings the velocity back onto the path. The slip
  * uses the planned speed, not the measured one.
  *
- * Remaining length s and the measured travel speed pick the speed. The
- * fastest speed that still arrives at target.exit_speed under the
- * acceleration limit is
+ * Remaining length, curvature, and the curvature slope pick the speed.
+ * A backward pass from the exit speed takes the tightest of
  *
- *   v_ideal = min(cruise_speed, sqrt(exit_speed² + 2 * accel * s))
+ *   v ≤ cruise_speed
+ *   v ≤ sqrt(exit_speed² + 2 * accel * Δs)  at every sample ahead
+ *   v² |κ| ≤ centripetal_accel
+ *   v |κ| ≤ Robot::MAX_VEL_ANG
+ *   v² |dκ/ds| ≤ Physics::MAX_ACCEL_ANG
  *
- * accel is target.max_accel when that is set, and config.path_accel
- * otherwise. Each tick the command steps from the measured speed toward
- * v_ideal by at most accel * dt. target.exit_speed is m/s along
+ * so a straight runs up to cruise and a corner only gives up the speed
+ * the tires and the yaw motor cannot hold. accel is target.max_accel
+ * when that is set, and config.path_accel otherwise. Each tick the
+ * command steps from the measured speed toward that ceiling by at most
+ * accel * dt. target.exit_speed is m/s along
  * target.exit_direction. Zero stops. Linear volts are the feedforward of
  * that speed and of the acceleration the step used. With exit_speed at 0
  * and the robot inside close_m, the heading target becomes the finish
@@ -148,6 +153,7 @@
  * expects a 10 ms tick; the Boomerang derivative gains are per tick.
  * ------------------------------------------------------------------------- */
 
+#include "control/DriftPathFit.h"
 #include "core/Types.h"
 #include "core/Specs.h"
 #include "core/Tuning.h"
@@ -157,19 +163,23 @@
 #include <math.h>
 #include <optional>
 
-enum class DriftCurveShape { Arc, Exponential, Quartic, Quintic, Hermite, QuarticHermite };
+enum class DriftCurveShape {
+    Arc, Exponential, Quartic, Quintic, Hermite, QuarticHermite
+};
 
 struct DriftCurveConfig {
     // DriftCurveShape shape = DriftCurveShape::Arc;
     // DriftCurveShape shape = DriftCurveShape::Quartic;
     // DriftCurveShape shape = DriftCurveShape::Exponential;
     // DriftCurveShape shape = DriftCurveShape::Quintic;
-    // DriftCurveShape shape = DriftCurveShape::Hermite;
-    DriftCurveShape shape = DriftCurveShape::QuarticHermite;
+    DriftCurveShape shape = DriftCurveShape::Hermite;
+    // DriftCurveShape shape = DriftCurveShape::QuarticHermite;
     double exp_rate = Drift::EXP_RATE;       // 1/m, Exponential only. See the header note.
     double close_m = Boomerang::CLOSE_IN * kMetersPerInch;
     double drift_accel = Drift::DRIFT_ACCEL; // m/s^2; tan(slip) = v^2 * kappa / this
     double max_slip_rad = Drift::MAX_SLIP_RAD;
+    double centripetal_accel = Drift::CENTRIPETAL_ACCEL; // m/s^2; v^2 |κ| cap on the profile
+    double speed_reward = Drift::SPEED_REWARD;           // >1 holds more speed, looser tracking
     bool   forwards = true;            // false backs up; the nose finishes opposite exit_direction
     double max_volts = System::MAX_VOLTS;
 
@@ -197,6 +207,9 @@ struct DriftCurveTarget {
     double line_length = 0.5 * kInchesPerMeter;
     bool ignore_direction = false;
     bool backwards = false;
+    // Latched swing. The plan is the orbit about the goal, and the command
+    // presses into the point while yawing onto exit heading. See PathConstraints.
+    bool turn_on_goal = false;
 
     // heading is the nose. v along the nose becomes exit_speed; negative v
     // reverses, so the travel direction is opposite the nose.
@@ -212,6 +225,7 @@ struct DriftCurveTarget {
         target.line_length = path.line_length_in;
         target.ignore_direction = path.ignore_heading;
         target.backwards = reverse;
+        target.turn_on_goal = path.turn_on_goal;
         if (path.max_accel_mps2 >= 0.0) target.max_accel = path.max_accel_mps2;
         return target;
     }

@@ -8,7 +8,7 @@
  *       TurnTo(Rotation2d::fromDegrees(90))
  *           .afterTurn(degrees(30), robotMechanisms().intake.out()),
  *       DriveTo(poseInches(48, 48, 90))
- *           .then(robotMechanisms().shooter.spin()),
+ *           .then(robotMechanisms().cascade.up()),
  *   });
  *   scheduler.add(route.build());
  *

@@ -1,8 +1,8 @@
 #pragma once
 /* ---------------------------------------------------------------------------
- * SubsystemControl  --  non-chassis actuation (intake, rollers, pneumatics,
- * future lift, ...). Decodes buttons (via IMacroController) and applies the
- * resulting SubsystemCommand through the drivebase.
+ * SubsystemControl  --  non-chassis actuation (cascade, intake, claw).
+ * Decodes buttons (via IMacroController), runs the scoring macro, and applies
+ * the resulting SubsystemCommand through the drivebase.
  * ------------------------------------------------------------------------- */
 
 #include "core/Types.h"
@@ -18,5 +18,12 @@ SubsystemCommand controlSubsystems(IDriveBase& drive,
                                    const CommandVector& commands,
                                    uint32_t now_ms);
 
-// Replay path: apply an already-decoded subsystem command.
+// Live teleop and autonomous. Runs the scoring macro, then writes hardware.
+SubsystemCommand applySubsystemCommand(IDriveBase& drive,
+                                       IMacroController& macros,
+                                       const SubsystemCommand& commanded,
+                                       const ButtonState& buttons,
+                                       uint32_t now_ms);
+
+// Replay path: apply an already-decoded subsystem command. No scoring macro.
 void actuateSubsystems(IDriveBase& drive, const SubsystemCommand& sub);

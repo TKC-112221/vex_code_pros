@@ -23,7 +23,7 @@ public:
     virtual bool checkAutonTestRequested(const ButtonState& btn) = 0;
 
     virtual void updateDisplay(RobotMode mode, const Pose2d& pose, double total_heading,
-                               int frame_count) = 0;
+                               int frame_count, bool recording) = 0;
 
     virtual bool debugEnabled() const = 0;
 };

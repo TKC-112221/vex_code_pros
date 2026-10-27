@@ -1,24 +1,22 @@
 #pragma once
 /* ---------------------------------------------------------------------------
- * Mechanisms  --  intake, shooter rollers, and the two pneumatics.
+ * Mechanisms  --  intake, cascade, and the two pneumatics.
  *
  * Each one is a state machine. Commands call set(); they never write volts.
  * periodic() turns the states into a SubsystemCommand, and the drivebase
- * (the only motor owner) applies it on the control tick.
+ * (the only motor owner) applies it on the control tick. The scoring macro
+ * reads the cascade current itself and replaces that command while it runs.
  *
  * These run on that same tick, not on a second task. TankDrive already writes
  * every motor from the pipeline; a background task calling move_voltage would
  * race it. The localization task remains the odometry thread.
  *
- * The stored mode is a SubsystemIntent, the same type the driver macros
- * publish. periodic() turns it into volts through SubsystemIntent::toCommand.
- * pctToMv clamps anything past ±100, so 106 and -103 land on the same
- * voltage as teleop.
- * There is no lift on this robot. Intake current is not in the sensor dict,
- * so Jammed is entered only when a command asks for it.
+ * MAIN1 and MAIN2 are one differential. Cascade voltage spins them the same
+ * way. Intake voltage spins them opposite ways. Pneumatic B is the claw.
  * ------------------------------------------------------------------------- */
 
 #include "auton/Command.h"
+#include "logic/ScoreMacro.h"
 #include "core/Types.h"
 #include <memory>
 
@@ -38,17 +36,20 @@ private:
     IntakeState state_ = IntakeState::Idle;
 };
 
-class ShooterSubsystem {
+class CascadeSubsystem {
 public:
-    void set(ShooterState state) { state_ = state; }
-    ShooterState state() const { return state_; }
+    void set(CascadeState state) { state_ = state; }
+    CascadeState state() const { return state_; }
+    void requestScore(bool on) { score_ = on; }
+    bool scoreRequested() const { return score_; }
 
-    std::unique_ptr<Command> spin()    { return instant([this] { state_ = ShooterState::Spin; }); }
-    std::unique_ptr<Command> reverse() { return instant([this] { state_ = ShooterState::Reverse; }); }
-    std::unique_ptr<Command> idle()    { return instant([this] { state_ = ShooterState::Idle; }); }
+    std::unique_ptr<Command> up()   { return instant([this] { state_ = CascadeState::Up; score_ = false; }); }
+    std::unique_ptr<Command> down() { return instant([this] { state_ = CascadeState::Down; score_ = false; }); }
+    std::unique_ptr<Command> idle() { return instant([this] { state_ = CascadeState::Idle; score_ = false; }); }
 
 private:
-    ShooterState state_ = ShooterState::Idle;
+    CascadeState state_ = CascadeState::Idle;
+    bool score_ = false;
 };
 
 class PneumaticSubsystem {
@@ -73,25 +74,73 @@ private:
 class Mechanisms {
 public:
     IntakeSubsystem intake;
-    ShooterSubsystem shooter;
+    CascadeSubsystem cascade;
     PneumaticSubsystem pneumatics;
 
     // Motors off, solenoids released. Called when a command routine starts
     // or is cancelled, so a stale state cannot outlive the routine.
     void reset() {
         intake.set(IntakeState::Idle);
-        shooter.set(ShooterState::Idle);
+        cascade.set(CascadeState::Idle);
+        cascade.requestScore(false);
         pneumatics.setG(false);
         pneumatics.setB(false);
+        cancelScoreMacro();
     }
 
     // The mode autonomous is commanding, in the same shape the macros publish.
     SubsystemIntent intent() const {
-        return SubsystemIntent{intake.state(), shooter.state(), pneumatics.g(), pneumatics.b()};
+        SubsystemIntent intent{intake.state(), cascade.state(), pneumatics.g(), pneumatics.b()};
+        intent.score = cascade.scoreRequested();
+        return intent;
     }
 
     SubsystemCommand periodic() const { return intent().toCommand(); }
+
+    // Raise, seat the piece, open the claw, and return the cascade to the bottom.
+    std::unique_ptr<Command> score();
 };
+
+class ScoreMacroCommand : public Command {
+public:
+    explicit ScoreMacroCommand(Mechanisms& mech) : mech_(mech) {}
+
+    void initialize(const CommandTick& tick) override {
+        (void)tick;
+        mech_.intake.set(IntakeState::Idle);
+        mech_.cascade.set(CascadeState::Idle);
+    }
+
+    bool execute(CommandTick& tick) override {
+        (void)tick;
+        mech_.cascade.requestScore(true);
+        if (scoreMacroReleasedClaw()) mech_.pneumatics.setB(ScoreTune::kClawReleased);
+        if (!saw_run_) {
+            if (scoreMacroRunning()) saw_run_ = true;
+            return false;
+        }
+        if (!scoreMacroRunning()) {
+            mech_.cascade.requestScore(false);
+            mech_.cascade.set(CascadeState::Idle);
+            if (scoreMacroReleasedClaw()) mech_.pneumatics.setB(ScoreTune::kClawReleased);
+            return true;
+        }
+        return false;
+    }
+
+    void end(bool interrupted) override {
+        mech_.cascade.requestScore(false);
+        if (interrupted) cancelScoreMacro();
+    }
+
+private:
+    Mechanisms& mech_;
+    bool saw_run_ = false;
+};
+
+inline std::unique_ptr<Command> Mechanisms::score() {
+    return std::make_unique<ScoreMacroCommand>(*this);
+}
 
 inline Mechanisms& robotMechanisms() {
     static Mechanisms mechanisms;

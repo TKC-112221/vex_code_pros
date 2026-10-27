@@ -23,4 +23,8 @@ public:
     // Last live decode, as the shared mechanism mode. Recorded replay does
     // not update this; it applies the bitmask mix directly.
     virtual SubsystemIntent subsystemIntent() const { return {}; }
+
+    // Pneumatic B is the claw. The scoring macro opens it and the latch has
+    // to agree, or the next driver tick closes it again.
+    virtual void setPneumaticB(bool engaged) { (void)engaged; }
 };

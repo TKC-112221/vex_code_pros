@@ -2,9 +2,18 @@
 /* ---------------------------------------------------------------------------
  * MockDriveParams.h  --  the simulated plant. Robot tunables live in
  * core/Tuning.h. These numbers exist only in the host simulator.
+ *
+ * USE_TUNING_PASTE in Settings.h replaces the four dynamics knobs with
+ * python/tuning_paste.txt.
  * ------------------------------------------------------------------------- */
 
+#include "config/Settings.h"
+
 namespace MockPlant {
+#if USE_TUNING_PASTE
+#define TUNING_PASTE_PART 1
+#include "data/tuning_paste.inc"
+#else
     // First-order lag from commanded voltage to wheel speed.
     constexpr double VELOCITY_TAU_SEC = 0.15;
     // How fast roller friction bleeds off sideways speed.
@@ -13,6 +22,7 @@ namespace MockPlant {
     constexpr double SIDE_RESISTANCE_OHM = 1.6;
     // Multiplier on Robot::MAX_VEL_LIN. 1 keeps the spec sheet speed.
     constexpr double SPEED_SCALE = 1.0;
+#endif
     // 10 ms loop * 3 = 30 ms, next to the distance sensor's 33 ms budget.
     constexpr int RANGE_PERIOD_TICKS = 3;
 
@@ -27,4 +37,11 @@ namespace MockPlant {
     constexpr double REPORTED_TEMP_C = 35.0;
     // Voltages at or below this are not a usable full-scale reference.
     constexpr double MIN_FULL_SCALE_V = 1.0;
+
+    // Wall contact after wheel voltage has become body speed. Mass is a
+    // dressed V5 robot. A wall hit is an inelastic push at the corner that
+    // crossed the perimeter. A goal bump does not use this mass: the plant
+    // writes lateral and yaw speed directly.
+    constexpr double MASS_KG = 6.0;
+    constexpr int CONTACT_SUBSTEPS = 4;
 }

@@ -21,6 +21,7 @@
 
 #include "interfaces/IDriveBase.h"
 #include "interfaces/IFeedForward.h"
+#include "core/Specs.h"
 #include "hardware/MockDriveParams.h"
 #include <cstdint>
 
@@ -42,6 +43,7 @@ public:
 
     ChassisCommand applyDrive(const ChassisCommand& cmd, const ChassisObservation& obs) override;
     void applySubsystems(const SubsystemCommand& sub) override;
+    CascadeReading readCascade() const override;
     void stop() override;
 
     void alignHeadingTo(double target_rad) override;
@@ -85,7 +87,25 @@ public:
     void setDynamics(double velocity_tau_sec, double skid_tau_sec,
                      double side_resistance_ohm, double speed_scale);
 
+    // The plant the critic is allowed to see. The actor does not.
+    struct Dynamics {
+        double velocity_tau = 0;
+        double skid_tau = 0;
+        double side_resistance = 0;
+        double speed_scale = 0;
+    };
+    Dynamics dynamics() const {
+        return Dynamics{velocity_tau_, skid_tau_, side_resistance_, speed_scale_};
+    }
+
     void resetSensors();
+
+    // New IMU scale, calibration residual, and gyro integral, drawn from
+    // `seed`. The plant pose is left where it is. The reported heading matches
+    // that pose, and the encoder baseline matches the wheels, so the first
+    // reading contains only the motion that happens after this call.
+    void armLocalization(std::uint64_t seed);
+
     void printTelemetry() const;
 
 private:
@@ -110,8 +130,16 @@ private:
     double heading_rad_ = 0.0;
     double imu_offset_ = 0.0;
     // Plant pose the simulated distance sensors raycast from.
-    double true_x_ = 0.0, true_y_ = 0.0;
+    // Meters. The plant starts at the geometric center of the field, which
+    // is (0, FIELD_HALF) now that the origin is the center of the bottom edge.
+    double true_x_ = 0.0, true_y_ = Robot::Range::CENTER_Y_M;
     double battery_voltage_ = 12.0;
+
+    // Wall contact and the goal-lock square-up, after this tick's wheel speeds
+    // already exist. dt <= 0 only separates a pose that was placed through
+    // a wall. Encoder travel that the contact cancelled is taken back off
+    // the wheels.
+    void settleContacts(double dt_seconds);
 
     // Sensor-error state. The plant above stays clean; only the readings move.
     // Gyro scale is a property of the unit. Calibration redraws the residual
@@ -134,6 +162,14 @@ private:
     JoystickData joystick_{};
     ButtonState buttons_{};
     SubsystemCommand subsystems_{};
+
+    // Common-mode cascade. Positive degrees are up. The seat is where a
+    // goal takes the game piece and the holding current falls off.
+    double cascade_deg_ = 0;
+    double cascade_rpm_ = 0;
+    double cascade_amps_ = 0;
+    double cascade_torque_ = 0;
+    void stepCascade(double dt_seconds);
 
     void applyCurrentLimit(double& left_v, double& right_v, double v_lin, double v_ang) const;
     void ensureSensorScales();

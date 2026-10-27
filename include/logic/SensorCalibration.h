@@ -1,8 +1,8 @@
 #pragma once
 /* ---------------------------------------------------------------------------
  * SensorCalibration  --  PreAuton / mid-match sensor calibration entry point.
- * Hardcodes the calibration sequence; initialize() and the Up-button path
- * both call calibrateRobotSensors().
+ * Hardcodes the calibration sequence. The Up button and startup now run the
+ * blocking wait on the IMU task; this function remains the synchronous entry.
  * ------------------------------------------------------------------------- */
 
 #include "interfaces/IDriveBase.h"

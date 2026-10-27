@@ -5,8 +5,8 @@
  * Set the endpoint with DriftCurveTarget::fromMotion on a MotionPose
  * (x, y, heading, speed), then set g_drift_curve_on.
  * g_drift_curve_abort stops it. The default target
- * is a stop at the origin, leaving along +X. A alone while idle arms whatever
- * target is currently stored.
+ * is a stop at the origin, leaving along +X. A alone while idle or recording
+ * arms whatever target is currently stored.
  * ------------------------------------------------------------------------- */
 
 #include "control/DriftCurve.h"
@@ -21,10 +21,12 @@ class IFeedForward;
 extern bool g_drift_curve_on;
 
 // Abort commanded (sticks while A is released, leaving driver control,
-// calibrate, auton, disable). The dispatcher clears the run flag when this is set.
+// calibrate, auton, disable). Driver control is idle and recording.
+// The dispatcher clears the run flag when this is set.
 extern bool g_drift_curve_abort;
 
-// A edge, stick deflection while A is released, and leaving idle. Updates the two flags.
+// A edge, stick deflection while A is released, and leaving driver control.
+// Updates the two flags.
 void driftCurveOverridePoll(const ButtonState& buttons,
                             const JoystickData& raw_sticks,
                             RobotMode mode);

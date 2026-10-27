@@ -1,6 +1,8 @@
+--find-links=X:\whl
+
 gymnasium>=0.29
 stable-baselines3>=2.2
-torch
+torch==2.14.1+cu126
 numpy
 pybind11
 matplotlib

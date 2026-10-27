@@ -24,6 +24,8 @@ constexpr double kInchesPerMeter = 1.0 / kMetersPerInch;
 
 // ---- Geometry --------------------------------------------------------------
 // Position only. Path samples, particles, and logs use this.
+// Origin is the center of the bottom edge of the 12 ft field (Robot::Range).
+// +x toward the right wall, +y toward the far wall.
 struct Pose2d {
     double x = 0;      // inches, field frame
     double y = 0;      // inches, field frame
@@ -55,16 +57,65 @@ struct MotionPose {
     Pose2d geometry() const { return Pose2d{x, y, heading}; }
 };
 
+// What DriftFollower reads off the stored polyline each tick.
+// Curvature passes κ, dκ/ds, and d²κ/ds² at the lookahead.
+// Heading passes the travel tangent at regular stations ahead and rebuilds
+// κ and dκ/ds from the change in that tangent. d²κ/ds² stays zero.
+enum class FollowerInput { Curvature, Heading };
+
+// Keep-out for a line-segment plan. x, y, and min_dist are inches, the same
+// frame as Pose2d. min_dist is the radius pose centers stay outside.
+struct PathObstacle {
+    double x = 0;
+    double y = 0;
+    double min_dist = 0;
+};
+
+constexpr int kPathObstacles = 4;
+
 // Extra limits for a MotionPose drive. max_accel_mps2 < 0 keeps the
 // follower's own acceleration. handoff_in > 0 ends the drive that far from
 // the pose while v is still non-zero. Lengths are inches, same as Pose2d.
 // The line-length default is the old 0.5 m finish.
+// turn_on_goal assumes the front edge is already on a goal. The heading in
+// the pose is the direction the nose should finish facing. The center rides
+// the orbit around that point, and the command is a hard forward press plus
+// yaw. The press stays larger than the yaw so the inside wheel never reverses
+// and walks the bumper off the point.
+// follower_input selects the geometry the slip and yaw feedforward read.
+// line_segments plans a polyline instead of a curve. obstacles and
+// field_bound apply to that plan. The orbit stays on the curve follower.
 struct PathConstraints {
     double max_accel_mps2 = -1.0;
     double line_length_in = 0.5 * kInchesPerMeter;
     bool ignore_heading = false;
     double handoff_in = 0.0;
+    bool turn_on_goal = false;
+    FollowerInput follower_input = FollowerInput::Curvature;
+    bool line_segments = false;
+    bool field_bound = false;
+    int obstacle_n = 0;
+    PathObstacle obstacles[kPathObstacles] {};
 };
+
+inline PathConstraints turnOnGoal(PathConstraints path = {}) {
+    path.turn_on_goal = true;
+    return path;
+}
+
+// Travel tangents at regular stations, instead of κ and its derivatives.
+inline PathConstraints headingInput(PathConstraints path = {}) {
+    path.follower_input = FollowerInput::Heading;
+    return path;
+}
+
+// Straight segments instead of a curve. Keep-outs on the constraints are
+// circles the polyline stays outside. An orbit (turn_on_goal) still uses
+// the curve follower.
+inline PathConstraints segmentPath(PathConstraints path = {}) {
+    path.line_segments = true;
+    return path;
+}
 
 // A chassis-frame velocity/effort vector.
 //   vx    -> along the robot's forward axis
@@ -145,31 +196,58 @@ struct CommandVector {
 };
 
 // ---- Subsystem (non-drive) output ------------------------------------------
-// Volts the drivebase applies. Produced from a SubsystemIntent, or, on the
-// replay path, from a recorded button bitmask.
+// Percents the drivebase mixes onto MAIN1/MAIN2. Same-direction voltage is
+// the cascade. Opposite-direction voltage is the intake. Pneumatic B is the
+// claw (true = released). Produced from a SubsystemIntent, or, on the replay
+// path, from a recorded button bitmask.
 struct SubsystemCommand {
-    int  intake_pct = 0;
-    int  roller_top_pct = 0;
-    int  roller_bottom_pct = 0;
+    int  cascade_pct = 0;   // + up, - down. Both motors, same direction.
+    int  intake_pct = 0;    // + in, - out. The two motors, opposite directions.
     bool pneumatics_g_state = false;
     bool pneumatics_b_state = false;
+    bool score = false;        // rising edge starts the scoring macro
     uint8_t raw_bitmask = 0;   // exact requested button state (for logging/replay)
 };
+
+// Common-mode reading of the MAIN1/MAIN2 differential. Positive is up.
+struct CascadeReading {
+    double position_deg = 0;
+    double velocity_rpm = 0;
+    double current_amps = 0;   // average motor current
+    double torque_nm = 0;      // common-mode torque, positive up
+};
+
+// Shoulder buttons, shared by live decoding and recorded replay.
+// R1 intake in, R2 intake out, L1 cascade up, L2 cascade down.
+// Both buttons of a pair cancel that pair.
+inline SubsystemCommand mixShoulderButtons(bool r1, bool r2, bool l1, bool l2,
+                                           bool pneumatic_g, bool pneumatic_b,
+                                           uint8_t bitmask) {
+    SubsystemCommand sub;
+    if (r1 && !r2) sub.intake_pct = 100;
+    else if (r2 && !r1) sub.intake_pct = -100;
+    if (l1 && !l2) sub.cascade_pct = 100;
+    else if (l2 && !l1) sub.cascade_pct = -100;
+    sub.pneumatics_g_state = pneumatic_g;
+    sub.pneumatics_b_state = pneumatic_b;
+    sub.raw_bitmask = bitmask;
+    return sub;
+}
 
 // Shared mechanism mode. Autonomous commands and the driver macros both
 // store this. toCommand() is the one percent table.
 enum class IntakeState { Idle, In, Out, Jammed };
-enum class ShooterState { Idle, Spin, Reverse };
+enum class CascadeState { Idle, Up, Down };
 
 struct SubsystemIntent {
     IntakeState intake = IntakeState::Idle;
-    ShooterState shooter = ShooterState::Idle;
+    CascadeState cascade = CascadeState::Idle;
     bool pneumatic_g = false;
     bool pneumatic_b = false;
+    bool score = false;
 
-    // Solo intake matches a driver holding only R1 or R2, including the
-    // small roller nudge from that button mix. Shooter matches L1 / L2.
-    // Jammed and Idle contribute no motor voltage.
+    // Solo intake matches a driver holding only R1 or R2. Cascade matches
+    // L1 / L2. Jammed and Idle contribute no motor voltage.
     SubsystemCommand toCommand() const {
         SubsystemCommand out;
         switch (intake) {
@@ -178,24 +256,14 @@ struct SubsystemIntent {
             case IntakeState::Idle:
             case IntakeState::Jammed: break;
         }
-        switch (shooter) {
-            case ShooterState::Spin:
-                out.roller_top_pct = 106;
-                out.roller_bottom_pct = 97;
-                break;
-            case ShooterState::Reverse:
-                out.roller_top_pct = -24;
-                out.roller_bottom_pct = -103;
-                break;
-            case ShooterState::Idle: break;
-        }
-        if (shooter == ShooterState::Idle
-            && (intake == IntakeState::In || intake == IntakeState::Out)) {
-            out.roller_top_pct = -4;
-            out.roller_bottom_pct = 2;
+        switch (cascade) {
+            case CascadeState::Up:   out.cascade_pct = 100;  break;
+            case CascadeState::Down: out.cascade_pct = -100; break;
+            case CascadeState::Idle: break;
         }
         out.pneumatics_g_state = pneumatic_g;
         out.pneumatics_b_state = pneumatic_b;
+        out.score = score;
         return out;
     }
 };
@@ -240,6 +308,10 @@ struct ChassisObservation {
     // Filled by ImuLinearDelta after each accel integration step.
     double v_inertial_fwd = 0;  // m/s, body forward
     double v_inertial_lat = 0;  // m/s, body left
+
+    // Seconds this travel sample actually covers. 0 means the caller did not
+    // measure it, and the localization step uses System::DT_SEC.
+    double sample_dt = 0;
 };
 
 // One VEX distance-sensor sample. Invalid readings (no return, out of range,

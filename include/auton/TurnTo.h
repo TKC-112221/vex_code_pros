@@ -4,7 +4,7 @@
  *
  *   TurnTo(Rotation2d::fromDegrees(90))
  *       .afterTurn(degrees(30), robotMechanisms().intake.in())
- *       .then(robotMechanisms().shooter.idle())
+ *       .then(robotMechanisms().cascade.idle())
  *
  * The leg is a TurnToHeading. The robot yaws where it stands; it does not
  * chase a path. afterTurn() is a subcommand: the pivot keeps going, and the

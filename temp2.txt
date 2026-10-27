@@ -1,0 +1,128 @@
+Your implementation in `DriftCurve.h` and `DriftCurve.cpp` is a creative hybrid: it combines a geometric curve generator and a 1D minimum-time velocity profiler with a heuristic spatial smoother, wrapped inside a VEX/LemLib-style voltage controller with sideslip compensation. While it captures the *spirit* of adjusting a path's curvature based on speed limits, its mathematical foundation differs fundamentally from a true Timed Elastic Band (TEB) algorithm.
+
+---
+
+## 1. How Your Implementation Differs from True TEB
+
+| Feature | Your `TimedElastic` Implementation | Standard ROS TEB (`teb_local_planner`) |
+| --- | --- | --- |
+| **Core Solver** | Alternating heuristic pass: retimes the chain, then shifts waypoints toward neighbor midpoints.
+
+ | Joint non-linear least-squares optimization (via `g2o` / Levenberg-Marquardt) over all variables simultaneously. |
+| **State Variables** | 2D positions $(x_i, y_i)$ with a sign flag (`drive`) and a derived 1D speed. Orientation $\theta_i$ is not optimized (`out[i].theta = 0.0`).
+
+ | Full $SE(2)$ poses $(x_i, y_i, \theta_i)$ and explicit time intervals $\Delta T_i$ between every consecutive pose pair. |
+| **Temporal Persistence** | **Stateless across ticks:** Rebuilds the band from a Hermite seed on every 10 ms tick, saving only a scalar `drive_hint_`.
+
+ | **Warm-started (Stateful):** Maintains the deformed band in memory across ticks, pruning passed poses and appending new ones. |
+| **Kinematics & Speed** | Decoupled: `timedBandThrough` runs internally, then `compute()` extracts arc-length `knots` and re-runs a 1D backward pass (`feasibleSpeedAt`).
+
+ | Coupled: Velocities ($v_i = \Delta s_i / \Delta T_i$) and accelerations are algebraic functions of pose spacing and $\Delta T_i$ inside the solver. |
+| **Obstacle Avoidance** | **None:** Purely a boundary-value curve fitter between the robot's pose `(rx, ry)` and the target `(fit_x, fit_y)`.
+
+ | **Primary driver:** External repulsive forces from costmap obstacles push poses away while internal tension pulls them taut. |
+| **Control Output** | Samples a lookahead tangent (`timedBandLook`), adds centripetal slip ($\sigma$), and runs feedforward + PID to output motor voltages.
+
+ | Extracts linear and angular velocity commands $(v, \omega)$ directly from the first $\Delta T$ interval of the optimized band. |
+
+### Key Algorithmic Differences in Detail
+
+* **Laplacian Midpoint Smoothing vs. Multi-Objective Optimization:**
+In your implementation, each free pose steps toward the midpoint of its neighbors ($\frac{1}{2}(P_{i-1} + P_{i+1})$), taking a larger step when the bend is too tight for `centripetal_accel` and a smaller step when well inside the budget. Mathematically, stepping toward neighbor midpoints is **Laplacian smoothing** (minimizing string tension $\sum \Vert{}P_{i+1} - P_i\Vert{}^2$). Because your first segment is locked to the measured momentum and the last segment is locked to the exit direction, uniform midpoint averaging simply pulls the interior points into a straight line and concentrates sharp curvature kinks right at the clamped endpoints (`P[1]` and `P[N-2]`). True TEB does not step toward midpoints; it moves poses along the negative gradient of a unified cost function that explicitly penalizes angular acceleration, linear acceleration, non-holonomic slip, and total time.
+
+
+* **Redundant / Decoupled Time Parameterization:**
+In `DriftCurve::compute()`, after `timedBandThrough` finishes building and retiming the band, you extract up to `kSpeedKnots` spatial curvature samples via `bandKnots(band, knots, kSpeedKnots)` and pass them into `feasibleSpeedAt(...)`. This means the actual motor command ignores the internal timing of your band and treats it just like `Hermite` or `Arc`—as a static geometric polyline over which a 1D backward pass (`v <= sqrt(exit_speed^2 + 2 * accel * ds)`, `v^2 |k| <= centripetal_accel`) is calculated.
+
+
+* **Rebuilding Every Tick Destroys "Elastic Memory":**
+Your header notes that *"The band is rebuilt on every tick"* from the Hermite curve, keeping only `drive_hint_ = band.drive[0]` to prevent forward/reverse chattering. In a true TEB, if the band deforms around an obstacle or settles into a smooth reversing cusp (a three-point turn), that deformed shape persists into the next tick so the solver only needs 2–4 fast iterations to update it as the robot moves.
+
+
+
+---
+
+## 2. Modifications Needed to Achieve a Working TEB
+
+Because your controller runs on a tight **10 ms tick** (`System::DT_SEC`), you should not use a heavy ROS library like `g2o`. Instead, you can upgrade your `TimedBand` implementation in `DriftPathFit.h` and `DriftCurve` to a lightweight, embedded-friendly TEB using the following four modifications:
+
+### Modification 1: Persist the Band Across Ticks (Warm-Starting)
+
+Instead of regenerating `TimedBand` from a Hermite seed every 10 ms in `DriftCurve::compute()`, store the band as a member variable in `DriftCurve`:
+
+1. **Add state to `DriftCurve.h`:** Store `driftpath::TimedBand band_;` and `bool band_valid_ = false;` in the private members of `DriftCurve`, and set `band_valid_ = false;` inside `DriftCurve::reset()`.
+
+
+2. **Seed once, then update:** On the first tick (`!band_valid_`), initialize `band_` from your Hermite seed (`hermiteThrough`).
+
+
+3. **Prune and shift on subsequent ticks:** On every subsequent tick, find the pose on `band_` closest to the current robot position `(rx, ry)`, drop the poses behind the robot, snap `band_.x[0]`, `band_.y[0]`, and `band_.theta[0]` to the current robot state, and run a few optimization passes on the *existing* poses.
+
+
+
+### Modification 2: Include Explicit Orientation ($\theta_i$) and Time ($\Delta t_i$) in `TimedBand`
+
+Right now, `samplePath` sets `out[i].theta = 0.0`, and your band relies on positions `(x[i], y[i])`. Update your `TimedBand` struct so each node $i \in [0, N-1]$ explicitly stores:
+
+* Pose: `x[i]`, `y[i]`, `theta[i]`
+* Time interval to the next pose: `dt[i]` (for $i \in [0, N-2]$)
+
+For a differential-drive chassis, consecutive poses must satisfy the **exact arc / non-holonomic constraint**: the heading change must be symmetric across the displacement vector $\Delta \mathbf{p}_i = (x_{i+1} - x_i, y_{i+1} - y_i)$:
+
+
+$$\theta_i + \theta_{i+1} = 2 \cdot \text{atan2}(\Delta y_i, \Delta x_i) \quad (\text{or } + \pi \text{ when reversing})$$
+
+
+Optimizing $\theta_i$ alongside $(x_i, y_i)$ prevents the midpoint smoother from creating un-drivable S-kinks near the start and goal.
+
+### Modification 3: Replace Midpoint Stepping with Gradient / Penalty Updates
+
+Instead of stepping each free pose toward $\frac{1}{2}(P_{i-1} + P_{i+1})$, run 3 to 5 iterations per tick of gradient descent (or Gauss-Newton) over a composite objective function $J$. For each segment $i$ with chord length $\Delta s_i = \Vert{}\mathbf{p}_{i+1} - \mathbf{p}_i\Vert{}$, heading change $\Delta \theta_i = \text{normalize}(\theta_{i+1} - \theta_i)$, and time step $\Delta t_i$:
+
+1. **Derive Kinematics Directly from $\Delta t_i$:**
+
+$$v_i = \frac{\text{drive}_i \cdot \Delta s_i}{\Delta t_i}, \qquad \omega_i = \frac{\Delta \theta_i}{\Delta t_i}, \qquad a_i = \frac{2(v_{i+1} - v_i)}{\Delta t_i + \Delta t_{i+1}}$$
+
+
+2. **Update $\Delta t_i$ via Competing Time vs. Kinematic Forces:**
+* **Time-optimality force:** Shrinks $\Delta t_i$ at a constant rate ($-\eta_t w_{\text{time}}$) to make the trajectory as fast as possible.
+* **Kinematic penalty force:** Stretches $\Delta t_i$ whenever $\vert{}v_i\vert{} > v_{\text{cruise}}$, $\vert{}a_i\vert{} > a_{\text{max}}$, $\vert{}\omega_i\vert{} > \omega_{\text{max}}$, or $\vert{}v_i \omega_i\vert{} > a_{\text{centripetal}}$:
+
+
+```cpp
+// Minimum dt required by velocity, centripetal accel, and yaw rate limits
+double dt_min_vel  = ds / lim.cruise_speed;
+double dt_min_cent = std::sqrt((ds * std::fabs(dtheta)) / lim.centripetal);
+double dt_min_omega = std::fabs(dtheta) / Robot::MAX_VEL_ANG;
+
+```
+
+
+
+
+3. **Update Spatial Poses $(x_i, y_i)$ Using Bending Energy (Curvature) Instead of String Tension:**
+* Rather than pulling $P_i$ toward the midpoint of $P_{i-1}$ and $P_{i+1}$ (which collapses smooth curves into straight lines with sharp corners at the fixed ends), penalize the **discrete curvature change** ($P_{i-1} - 2P_i + P_{i+1}$ relative to the adjacent segments, or the discrete turning angle $\kappa_i = \Delta \theta_i / \Delta s_i$) only where $\vert{}\kappa_i\vert{}$ exceeds $\kappa_{\max} = a_{\text{centripetal}} / v_i^2$, plus a small fourth-order smoothness term (biharmonic smoothing) so curvature transitions smoothly at the clamped endpoints.
+
+
+
+### Modification 4: Add Obstacle Repulsion and Unify the Velocity Output
+
+1. **Add Obstacles to `TebLimits`:**
+Even without a full ROS costmap, adding a small fixed array of circular obstacles or field perimeter bounds to `TebLimits` gives the elastic band a true purpose. For any pose $(x_i, y_i)$ within distance $d < d_{\text{min}}$ of an obstacle $(o_x, o_y)$:
+
+
+```cpp
+double dx = band.x[i] - obs.x;
+double dy = band.y[i] - obs.y;
+double d = std::hypot(dx, dy);
+if (d < obs.min_dist && d > 1e-4) {
+    double push = weight_obstacle * (obs.min_dist - d) / d;
+    band.x[i] += push * dx;
+    band.y[i] += push * dy;
+}
+
+```
+
+
+2. **Use the Band's Optimized Speed Directly in `DriftCurve::compute()`:**
+Once `TimedBand` stores valid `dt[i]` (or optimized `v[i]` at each node), you no longer need to call `bandKnots(...)` and `feasibleSpeedAt(...)` after `timedBandThrough(...)`. You can interpolate `v_ideal`, `phi`, and `kappa` directly from `band` at your lookahead distance `look`, keeping your existing sideslip compensation (`sigma = std::atan2(v_ref * v_ref * kappa, config.drift_accel)`) and voltage feedforward/PID loop intact.

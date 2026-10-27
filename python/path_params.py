@@ -6,8 +6,10 @@ Everything that shapes the generated path, the reward, and the teacher
 lives here.
 """
 
-# Discount shared by the env default and the SAC trainer.
-DEFAULT_GAMMA = 0.999
+# Discount shared by the env default and the SAC trainer. A finished
+# pass is about 180 plant steps, so 0.99 keeps about 100 steps of it in
+# the return. A longer horizon sums any per-step bias in the backup.
+DEFAULT_GAMMA = 0.99
 
 # Sample spacing for the generated polyline, inches.
 DS_IN = 0.5
@@ -23,12 +25,14 @@ THRUST_WEIGHT = 1.0
 APPROACH_GAIN = 0.8
 # Per inch of cross-track, per step.
 DIST_WEIGHT = 0.03
+# The finishing and diverging steps get no extra lump. A finished run is
+# already worth more than a bailout on the path return, and the demo
+# writer stores that return with the bootstrap cut. A lump of tens of
+# points is large enough for this discount to run the critic away.
 # Clock-ramp half duration, seconds. Thrust falls and rises in this long.
 RAMP_HALF_SEC = (0.20, 0.45)
 # Off the path by more than this, the episode is over.
 DIVERGE_IN = 12.0
-# Reaching the polyline within this many inches of its end counts as done.
-FINISH_IN = 3.0
 # Clock bounds, in steps.
 MIN_HORIZON = 500
 MAX_HORIZON = 1600
@@ -78,22 +82,28 @@ HORIZON_PAD_STEPS = 200.0
 YAW_HEADING = 1.3
 YAW_CROSS = 0.07
 YAW_CURVATURE = 0.09
-# Below this, the observation uses the chassis nose as the velocity heading.
-# Same threshold as DrivePolicy::kStoppedSpeedMps.
-STOPPED_SPEED_MPS = 0.05
 
 # Projection search window around the previous hint, in samples.
 HINT_BACK = 4
 HINT_AHEAD = 40
 
-# Curriculum, easy to hard.
+# Curriculum, easy to hard. The last stage drives between two random poses.
 STAGES = (
     "straight",
     "straight-stop",
     "gentle",
     "mixed",
     "full",
+    "pose",
 )
+# Point-to-point. Both poses are sampled inside the field margin. The
+# chord is kept in this band, and the connecting path cannot be longer
+# than a slow crawl can finish inside the episode clock.
+POSE_MIN_IN = 24.0
+POSE_MAX_IN = 96.0
+POSE_MAX_LENGTH_IN = 220.0
+# A fly-by counts only once the nose is this close to the exit heading.
+POSE_HEAD_DEG = 20.0
 MIXED_BENDS = (1, 3)
 FULL_BENDS = (1, 4)
 FULL_DIPS = (0, 3)

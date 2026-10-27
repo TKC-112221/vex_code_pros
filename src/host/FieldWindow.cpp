@@ -3,11 +3,14 @@
  * MockDrive calls these; the V5 link does not include this file.
  * ------------------------------------------------------------------------- */
 #include "host/FieldWindow.h"
+#include "auton/AutonCatalog.h"
 #include "core/Specs.h"
-#include "host/DeviceScreens.h"
+#include "field/FieldPoints.h"
+#include "logic/GoalAligner.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cwchar>
@@ -18,10 +21,14 @@
 
 namespace {
 
-constexpr int kFieldPx = 760;
-constexpr int kPanelW = 520;
+constexpr int kPaneW = 840;
+constexpr int kDropH = 36;
+constexpr int kRowH = 34;
+constexpr int kWindowH = 980;
+constexpr int kMaxRows = 16;
+constexpr int kPreviewCap = 512;
 constexpr double kFieldIn = 12.0 * 12.0;
-constexpr double kBodyLengthIn = 0.38 * kInchesPerMeter;
+constexpr double kBodyLengthIn = Robot::Chassis::BODY_LENGTH_M * kInchesPerMeter;
 constexpr double kPi = 3.14159265358979323846;
 
 HWND g_hwnd = nullptr;
@@ -51,6 +58,38 @@ int g_brain_h = 0;
 RECT g_brain_lcd{0, 0, 0, 0};
 bool g_skip_brain = false;
 
+RECT g_drop_rect{};
+RECT g_list_rect{};
+RECT g_row_rect[kMaxRows]{};
+int g_row_index[kMaxRows]{};
+int g_row_n = 0;
+RECT g_menu_rect[3]{};
+bool g_drop_open = false;
+int g_list_scroll = 0;
+int g_hover_row = -1;
+int g_hover_menu = -1;
+bool g_hover_drop = false;
+
+Pose2d g_preview[kPreviewCap]{};
+int g_preview_n = 0;
+auton::AutonSide g_preview_side = auton::AutonSide::Skills;
+unsigned g_preview_key = 0xffffffffu;
+
+int g_intake_pct = 0;
+int g_cascade_pct = 0;
+bool g_pneu_g = false;
+bool g_pneu_b = false;
+double g_cascade_frac = 0;
+double g_cascade_deg = 0;
+double g_cascade_rpm = 0;
+double g_cascade_amps = 0;
+char g_score_phase[16] = "Idle";
+
+HFONT makeUiFont(int px, int weight);
+void clearAutonHits();
+void drawAutonPane(HDC mem, int x, int y, int w, int h);
+void drawRoutePreview(HDC mem, int x, int y, int w, int h);
+
 bool keyDown(int vk) {
     return (GetAsyncKeyState(vk) & 0x8000) != 0;
 }
@@ -61,8 +100,10 @@ double stickAxis(int negative, int positive) {
 
 POINT fieldToScreen(double x, double y, double cx, double cy, double scale) {
     POINT p;
+    // Screen center is the geometric center of the field. The origin is the
+    // center of the bottom edge, one half-field below that.
     p.x = (LONG)std::lround(cx + x * scale);
-    p.y = (LONG)std::lround(cy - y * scale);
+    p.y = (LONG)std::lround(cy - (y - kFieldIn * 0.5) * scale);
     return p;
 }
 
@@ -95,6 +136,52 @@ void drawTrail(HDC mem, const std::vector<StampedPose>& trail, HPEN pen,
         pts.push_back(fieldToScreen(p.pose.x, p.pose.y, cx, cy, scale));
     SelectObject(mem, pen);
     Polyline(mem, pts.data(), (int)pts.size());
+}
+
+void drawLabel(HDC mem, int x, int y, const char* text);
+
+void drawRing(HDC mem, double x, double y, double radius_in,
+              double cx, double cy, double scale, HPEN pen) {
+    if (radius_in <= 0.0) return;
+    POINT c = fieldToScreen(x, y, cx, cy, scale);
+    int r = static_cast<int>(std::lround(radius_in * scale));
+    if (r < 1) r = 1;
+    HGDIOBJ oldPen = SelectObject(mem, pen);
+    HGDIOBJ oldBrush = SelectObject(mem, GetStockObject(HOLLOW_BRUSH));
+    Ellipse(mem, c.x - r, c.y - r, c.x + r, c.y + r);
+    SelectObject(mem, oldBrush);
+    SelectObject(mem, oldPen);
+}
+
+void drawGoals(HDC mem, double cx, double cy, double scale) {
+    const int active = goalAlignIndex();
+    HPEN hitPen = CreatePen(PS_DOT, 1, RGB(70, 130, 150));
+    HPEN standPen = CreatePen(PS_SOLID, 1, RGB(30, 110, 130));
+    HPEN hotPen = CreatePen(PS_SOLID, 2, RGB(0, 170, 160));
+    HPEN dotPen = CreatePen(PS_SOLID, 1, RGB(20, 80, 100));
+    HBRUSH dotBrush = CreateSolidBrush(RGB(20, 90, 110));
+    HBRUSH hotBrush = CreateSolidBrush(RGB(0, 150, 140));
+    const int n = static_cast<int>(Field::Point::Count);
+    for (int i = 0; i < n; ++i) {
+        const Field::Spot& spot = Field::kSpots[i];
+        if (!Field::isAlignGoal(spot)) continue;
+        const bool hot = (i == active);
+        drawRing(mem, spot.x, spot.y, spot.hitbox_in, cx, cy, scale, hot ? hotPen : hitPen);
+        drawRing(mem, spot.x, spot.y, spot.standoff_in, cx, cy, scale, hot ? hotPen : standPen);
+        POINT c = fieldToScreen(spot.x, spot.y, cx, cy, scale);
+        HGDIOBJ oldPen = SelectObject(mem, dotPen);
+        HGDIOBJ oldBrush = SelectObject(mem, hot ? hotBrush : dotBrush);
+        Ellipse(mem, c.x - 3, c.y - 3, c.x + 4, c.y + 4);
+        SelectObject(mem, oldBrush);
+        SelectObject(mem, oldPen);
+        drawLabel(mem, c.x + 6, c.y - 16, spot.name);
+    }
+    DeleteObject(hotBrush);
+    DeleteObject(dotBrush);
+    DeleteObject(dotPen);
+    DeleteObject(hotPen);
+    DeleteObject(standPen);
+    DeleteObject(hitPen);
 }
 
 void drawCurve(HDC mem, HPEN pen, double cx, double cy, double scale) {
@@ -155,55 +242,6 @@ void fillRoundRect(HDC mem, int left, int top, int right, int bottom,
     DeleteObject(brush);
 }
 
-void drawCentered(HDC mem, int left, int top, int right, int bottom, const char* text) {
-    SIZE sz{};
-    int n = (int)std::strlen(text);
-    GetTextExtentPoint32A(mem, text, n, &sz);
-    int x = left + ((right - left) - sz.cx) / 2;
-    int y = top + ((bottom - top) - sz.cy) / 2;
-    TextOutA(mem, x, y, text, n);
-}
-
-int fitFontPx(int lineH, int width, int cols) {
-    int byLine = lineH - 4;
-    int byCols = cols > 0 ? (width * 10) / (6 * cols) : byLine;
-    int px = byLine < byCols ? byLine : byCols;
-    if (px < 8) px = 8;
-    if (px > 22) px = 22;
-    return px;
-}
-
-HFONT makeMono(int px) {
-    return CreateFontW(-px, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                       ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                       CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
-}
-
-void drawLcdLines(HDC mem, int left, int top, int right, int bottom,
-                  int rows, int cols, COLORREF color, const char* const* lines) {
-    if (rows < 1 || bottom <= top || right <= left) return;
-    int lineH = (bottom - top) / rows;
-    if (lineH < 1) lineH = 1;
-    HFONT font = makeMono(fitFontPx(lineH, right - left, cols));
-    if (font == nullptr) return;
-    HGDIOBJ old = SelectObject(mem, font);
-    SetBkMode(mem, TRANSPARENT);
-    SetTextColor(mem, color);
-    TEXTMETRIC tm{};
-    GetTextMetrics(mem, &tm);
-    int extra = lineH - (int)tm.tmHeight;
-    if (extra < 0) extra = 0;
-    SaveDC(mem);
-    IntersectClipRect(mem, left, top, right, bottom);
-    for (int i = 0; i < rows; ++i) {
-        const char* s = lines[i] != nullptr ? lines[i] : "";
-        TextOutA(mem, left, top + i * lineH + extra / 2, s, (int)std::strlen(s));
-    }
-    RestoreDC(mem, -1);
-    SelectObject(mem, old);
-    DeleteObject(font);
-}
-
 void blitBrainLcd(HDC mem, int left, int top, int right, int bottom) {
     BITMAPINFO bmi{};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -222,17 +260,147 @@ void blitBrainLcd(HDC mem, int left, int top, int right, int bottom) {
     DeleteObject(clip);
 }
 
+void drawPill(HDC mem, int right, int y, const char* text, COLORREF fill, COLORREF ink) {
+    HFONT font = makeUiFont(14, FW_SEMIBOLD);
+    HGDIOBJ old = SelectObject(mem, font);
+    SIZE sz{};
+    const int n = (int)std::strlen(text);
+    GetTextExtentPoint32A(mem, text, n, &sz);
+    const int padX = 10;
+    const int boxW = sz.cx + padX * 2;
+    const int boxH = 22;
+    const int left = right - boxW;
+    fillRoundRect(mem, left, y, right, y + boxH, 10, fill, fill);
+    SetBkMode(mem, TRANSPARENT);
+    SetTextColor(mem, ink);
+    TextOutA(mem, left + padX, y + (boxH - sz.cy) / 2, text, n);
+    SelectObject(mem, old);
+    DeleteObject(font);
+}
+
+int drawMechRow(HDC mem, int x, int right, int y, const char* label, const char* value,
+                COLORREF fill, COLORREF ink) {
+    HFONT font = makeUiFont(15, FW_NORMAL);
+    HGDIOBJ old = SelectObject(mem, font);
+    SetBkMode(mem, TRANSPARENT);
+    SetTextColor(mem, RGB(214, 218, 224));
+    SIZE sz{};
+    GetTextExtentPoint32A(mem, label, (int)std::strlen(label), &sz);
+    TextOutA(mem, x, y + (22 - sz.cy) / 2, label, (int)std::strlen(label));
+    SelectObject(mem, old);
+    DeleteObject(font);
+    drawPill(mem, right, y, value, fill, ink);
+    return y + 28;
+}
+
+void drawCascadeBar(HDC mem, int x, int y, int w, double frac, int pct) {
+    if (frac < 0.0) frac = 0.0;
+    if (frac > 1.0) frac = 1.0;
+    const int h = 10;
+    fillRoundRect(mem, x, y, x + w, y + h, 8, RGB(16, 18, 22), RGB(48, 52, 58));
+    const int fillW = (int)std::lround((w - 4) * frac);
+    if (fillW <= 0) return;
+    const COLORREF c = pct > 0 ? RGB(86, 176, 114)
+                      : pct < 0 ? RGB(214, 148, 64)
+                                : RGB(118, 158, 198);
+    fillRoundRect(mem, x + 2, y + 2, x + 2 + fillW, y + h - 2, 6, c, c);
+}
+
+void drawSubsystemPanel(HDC mem, int x, int y, int w, int bottom) {
+    if (w < 80 || y + 80 > bottom) return;
+    drawLabel(mem, x, y, "Subsystems");
+    y += 24;
+
+    const int cardBottom = bottom - 12;
+    if (cardBottom - y < 80) return;
+
+    fillRoundRect(mem, x, y, x + w, cardBottom, 14, RGB(36, 38, 44), RGB(54, 58, 64));
+    const int inset = 16;
+    const int left = x + inset;
+    const int right = x + w - inset;
+    const int innerTop = y + 18;
+    const int innerBot = cardBottom - 18;
+    if (right - left < 40 || innerBot <= innerTop) return;
+
+    const COLORREF idleFill = RGB(58, 62, 68);
+    const COLORREF idleInk = RGB(196, 200, 206);
+    const COLORREF goFill = RGB(36, 104, 68);
+    const COLORREF goInk = RGB(214, 240, 220);
+    const COLORREF backFill = RGB(128, 82, 32);
+    const COLORREF backInk = RGB(255, 224, 184);
+    const COLORREF scoreFill = RGB(36, 78, 128);
+    const COLORREF scoreInk = RGB(214, 228, 248);
+
+    constexpr int kRow = 22;
+    constexpr int kMeter = 36;
+    constexpr int kGaps = 5;
+    const int fixed = kRow * 5 + kMeter;
+    int gap = 8;
+    if (innerBot - innerTop > fixed)
+        gap = (innerBot - innerTop - fixed) / kGaps;
+    if (gap < 8) gap = 8;
+    if (gap > 40) gap = 40;
+
+    SaveDC(mem);
+    IntersectClipRect(mem, x + 4, y + 4, x + w - 4, cardBottom - 4);
+
+    int row = innerTop;
+    const char* intake = "Idle";
+    COLORREF intakeFill = idleFill;
+    COLORREF intakeInk = idleInk;
+    if (g_intake_pct > 0) { intake = "In"; intakeFill = goFill; intakeInk = goInk; }
+    else if (g_intake_pct < 0) { intake = "Out"; intakeFill = backFill; intakeInk = backInk; }
+    drawMechRow(mem, left, right, row, "Intake", intake, intakeFill, intakeInk);
+    row += kRow + gap;
+
+    const char* cascade = "Idle";
+    COLORREF cascadeFill = idleFill;
+    COLORREF cascadeInk = idleInk;
+    if (g_cascade_pct > 0) { cascade = "Up"; cascadeFill = goFill; cascadeInk = goInk; }
+    else if (g_cascade_pct < 0) { cascade = "Down"; cascadeFill = backFill; cascadeInk = backInk; }
+    drawMechRow(mem, left, right, row, "Cascade", cascade, cascadeFill, cascadeInk);
+    row += kRow + gap;
+
+    drawCascadeBar(mem, left, row, right - left, g_cascade_frac, g_cascade_pct);
+    char metrics[64];
+    std::snprintf(metrics, sizeof(metrics), "%3.0f deg   %4.2f A   %+4.0f rpm",
+                  g_cascade_deg, g_cascade_amps, g_cascade_rpm);
+    HFONT font = makeUiFont(13, FW_NORMAL);
+    HGDIOBJ old = SelectObject(mem, font);
+    SetBkMode(mem, TRANSPARENT);
+    SetTextColor(mem, RGB(168, 174, 182));
+    TextOutA(mem, left, row + 14, metrics, (int)std::strlen(metrics));
+    SelectObject(mem, old);
+    DeleteObject(font);
+    row += kMeter + gap;
+
+    const bool clawOpen = g_pneu_b;
+    drawMechRow(mem, left, right, row, "Claw", clawOpen ? "Open" : "Closed",
+                clawOpen ? backFill : idleFill, clawOpen ? backInk : idleInk);
+    row += kRow + gap;
+    drawMechRow(mem, left, right, row, "Pneu G", g_pneu_g ? "On" : "Off",
+                g_pneu_g ? goFill : idleFill, g_pneu_g ? goInk : idleInk);
+    row += kRow + gap;
+
+    const bool scoring = std::strcmp(g_score_phase, "Idle") != 0;
+    drawMechRow(mem, left, right, row, "Score", g_score_phase,
+                scoring ? scoreFill : idleFill, scoring ? scoreInk : idleInk);
+    RestoreDC(mem, -1);
+}
+
 void drawSidePanel(HDC mem, int x, int y, int w, int h) {
     if (w < 40 || h < 40) return;
 
-    devicescreens::ControllerView ctrl{};
-    devicescreens::copyController(ctrl);
+    RECT column{x, y, x + w, y + h};
+    HBRUSH columnBg = CreateSolidBrush(RGB(22, 24, 28));
+    FillRect(mem, &column, columnBg);
+    DeleteObject(columnBg);
 
     HPEN sep = CreatePen(PS_SOLID, 1, RGB(54, 58, 64));
-    HGDIOBJ oldPen = SelectObject(mem, sep);
+    HGDIOBJ oldSep = SelectObject(mem, sep);
     MoveToEx(mem, x, y, nullptr);
     LineTo(mem, x, y + h);
-    SelectObject(mem, oldPen);
+    SelectObject(mem, oldSep);
     DeleteObject(sep);
 
     const int pad = 16;
@@ -242,19 +410,23 @@ void drawSidePanel(HDC mem, int x, int y, int w, int h) {
     const int originX = x + pad;
 
     drawLabel(mem, originX, cursor, "Brain");
-    cursor += 20;
+    cursor += 22;
+
+    // The right half is the brain screen over the subsystem states.
+    const int mid = y + h / 2;
+    int brainSlotB = mid - 12;
+    if (brainSlotB < cursor + 96) brainSlotB = cursor + 96;
 
     int brainW = innerW;
     int brainH = brainW * 272 / 480;
-    const int below = 18 + 20 + 108 + pad;
-    int maxBrainH = h - cursor - below;
-    if (maxBrainH < 96) maxBrainH = 96;
-    if (brainH > maxBrainH) {
-        brainH = maxBrainH;
+    const int brainSlotH = brainSlotB - cursor;
+    if (brainH > brainSlotH && brainSlotH > 0) {
+        brainH = brainSlotH;
         brainW = brainH * 480 / 272;
         if (brainW > innerW) brainW = innerW;
     }
     const int brainX = originX + (innerW - brainW) / 2;
+    if (brainH < brainSlotH) cursor += (brainSlotH - brainH) / 2;
 
     fillRoundRect(mem, brainX, cursor, brainX + brainW, cursor + brainH, 16,
                   RGB(52, 56, 64), RGB(30, 32, 38));
@@ -265,7 +437,7 @@ void drawSidePanel(HDC mem, int x, int y, int w, int h) {
     const int lcdT = cursor + inset;
     const int lcdR = brainX + brainW - inset;
     const int lcdB = cursor + brainH - inset;
-    fillRoundRect(mem, lcdL, lcdT, lcdR, lcdB, 8, RGB(246, 246, 244), RGB(210, 210, 206));
+    fillRoundRect(mem, lcdL, lcdT, lcdR, lcdB, 8, RGB(22, 24, 28), RGB(22, 24, 28));
     g_brain_lcd.left = lcdL;
     g_brain_lcd.top = lcdT;
     g_brain_lcd.right = lcdR;
@@ -275,62 +447,314 @@ void drawSidePanel(HDC mem, int x, int y, int w, int h) {
         g_brain_dib.size() == (std::size_t)g_brain_w * (std::size_t)g_brain_h * 4u;
     if (brain_frame) {
         blitBrainLcd(mem, lcdL, lcdT, lcdR, lcdB);
+        clearAutonHits();
     } else {
-        int btnH = (lcdB - lcdT) * 40 / 272;
-        if (btnH < 18) btnH = 18;
-        const int textL = lcdL + 10;
-        const int textR = lcdR - 8;
-        const int textT = lcdT + 8;
-        const int textB = lcdB - btnH - 10;
-        devicescreens::BrainView brain{};
-        devicescreens::copyBrain(brain);
-        const char* brainLines[devicescreens::kBrainLines];
-        for (int i = 0; i < devicescreens::kBrainLines; ++i) brainLines[i] = brain.lines[i];
-        drawLcdLines(mem, textL, textT, textR, textB, devicescreens::kBrainLines,
-                     devicescreens::kBrainCols, RGB(24, 26, 30), brainLines);
+        // The V5 brain is the selector on the left and the route preview
+        // on the right. 176 is the selector width on a 480-wide screen.
+        SaveDC(mem);
+        HRGN clip = CreateRoundRectRgn(lcdL, lcdT, lcdR + 1, lcdB + 1, 16, 16);
+        SelectClipRgn(mem, clip);
+        const int lcdW = lcdR - lcdL;
+        const int lcdH = lcdB - lcdT;
+        int selW = lcdW * 176 / 480;
+        if (selW < 110) selW = 110;
+        if (selW > lcdW - 80) selW = lcdW / 2;
+        drawAutonPane(mem, lcdL, lcdT, selW, lcdH);
+        drawRoutePreview(mem, lcdL + selW, lcdT, lcdW - selW, lcdH);
+        RestoreDC(mem, -1);
+        DeleteObject(clip);
+    }
 
-        const int btnT = lcdB - btnH - 6;
-        const int btnBtm = lcdB - 6;
-        const int gap = 8;
-        const int btnW = (textR - textL - gap * 2) / 3;
-        const char* btnName[3] = {"Left", "Center", "Right"};
-        if (btnW > 8 && btnBtm > btnT) {
-            HFONT font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-            HGDIOBJ oldFont = SelectObject(mem, font);
-            SetBkMode(mem, TRANSPARENT);
-            SetTextColor(mem, RGB(36, 40, 46));
-            for (int i = 0; i < 3; ++i) {
-                int left = textL + i * (btnW + gap);
-                fillRoundRect(mem, left, btnT, left + btnW, btnBtm, 8,
-                              RGB(214, 216, 220), RGB(150, 154, 160));
-                drawCentered(mem, left, btnT, left + btnW, btnBtm, btnName[i]);
+    HPEN rule = CreatePen(PS_SOLID, 1, RGB(54, 58, 64));
+    HGDIOBJ oldRule = SelectObject(mem, rule);
+    MoveToEx(mem, x + 12, mid, nullptr);
+    LineTo(mem, x + w - 12, mid);
+    SelectObject(mem, oldRule);
+    DeleteObject(rule);
+
+    drawSubsystemPanel(mem, originX, mid + 12, innerW, y + h);
+}
+
+COLORREF sideColor(auton::AutonSide side) {
+    switch (side) {
+        case auton::AutonSide::Red: return RGB(214, 104, 96);
+        case auton::AutonSide::Blue: return RGB(96, 146, 214);
+        case auton::AutonSide::Skills: return RGB(118, 184, 150);
+    }
+    return RGB(180, 180, 180);
+}
+
+COLORREF sideFill(auton::AutonSide side) {
+    switch (side) {
+        case auton::AutonSide::Red: return RGB(72, 34, 32);
+        case auton::AutonSide::Blue: return RGB(28, 44, 78);
+        case auton::AutonSide::Skills: return RGB(30, 52, 44);
+    }
+    return RGB(40, 42, 48);
+}
+
+HFONT makeUiFont(int px, int weight) {
+    return CreateFontW(-px, 0, 0, 0, weight, FALSE, FALSE, FALSE,
+                       ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                       CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+}
+
+void drawChevron(HDC mem, int x, int y, bool open) {
+    HPEN pen = CreatePen(PS_SOLID, 2, RGB(196, 200, 206));
+    HGDIOBJ old = SelectObject(mem, pen);
+    if (open) {
+        MoveToEx(mem, x, y + 5, nullptr);
+        LineTo(mem, x + 5, y);
+        LineTo(mem, x + 10, y + 5);
+    } else {
+        MoveToEx(mem, x, y, nullptr);
+        LineTo(mem, x + 5, y + 5);
+        LineTo(mem, x + 10, y);
+    }
+    SelectObject(mem, old);
+    DeleteObject(pen);
+}
+
+void drawUiText(HDC mem, RECT rect, const char* text, COLORREF color, UINT flags) {
+    SetTextColor(mem, color);
+    DrawTextA(mem, text != nullptr ? text : "", -1, &rect, flags);
+}
+
+void clearAutonHits() {
+    g_drop_rect = RECT{};
+    g_list_rect = RECT{};
+    g_row_n = 0;
+    for (int i = 0; i < 3; ++i) g_menu_rect[i] = RECT{};
+}
+
+void ensurePreview() {
+    const auton::AutonSelection sel = auton::currentSelection();
+    const unsigned key = static_cast<unsigned>(sel.side) * 256u
+        + static_cast<unsigned>(sel.index);
+    if (key == g_preview_key) return;
+    g_preview_side = sel.side;
+    g_preview_n = auton::previewSelected(g_preview, kPreviewCap);
+    g_preview_key = key;
+}
+
+void drawPreview(HDC mem, double cx, double cy, double scale) {
+    if (g_preview_n < 2) return;
+    const COLORREF color = sideColor(g_preview_side);
+    HPEN pen = CreatePen(PS_SOLID, 2, color);
+    HPEN edge = CreatePen(PS_SOLID, 1, color);
+    HBRUSH dot = CreateSolidBrush(color);
+    HGDIOBJ oldPen = SelectObject(mem, pen);
+    HGDIOBJ oldBrush = SelectObject(mem, GetStockObject(HOLLOW_BRUSH));
+
+    std::vector<POINT> pts;
+    pts.reserve((size_t)g_preview_n);
+    for (int i = 0; i < g_preview_n; ++i)
+        pts.push_back(fieldToScreen(g_preview[i].x, g_preview[i].y, cx, cy, scale));
+    Polyline(mem, pts.data(), g_preview_n);
+
+    drawChassis(mem, g_preview[0], cx, cy, scale,
+                (HBRUSH)GetStockObject(HOLLOW_BRUSH), edge, pen);
+
+    POINT end = pts.back();
+    SelectObject(mem, dot);
+    SelectObject(mem, pen);
+    Ellipse(mem, end.x - 4, end.y - 4, end.x + 5, end.y + 5);
+
+    SelectObject(mem, oldPen);
+    SelectObject(mem, oldBrush);
+    DeleteObject(pen);
+    DeleteObject(edge);
+    DeleteObject(dot);
+}
+
+void drawAutonPane(HDC mem, int x, int y, int w, int h) {
+    clearAutonHits();
+    if (w < 80 || h < 80) return;
+
+    RECT pane{x, y, x + w, y + h};
+    HBRUSH paneBg = CreateSolidBrush(RGB(22, 24, 28));
+    FillRect(mem, &pane, paneBg);
+    DeleteObject(paneBg);
+
+    HPEN sep = CreatePen(PS_SOLID, 1, RGB(54, 58, 64));
+    HGDIOBJ oldSep = SelectObject(mem, sep);
+    MoveToEx(mem, x + w - 1, y, nullptr);
+    LineTo(mem, x + w - 1, y + h);
+    SelectObject(mem, oldSep);
+    DeleteObject(sep);
+
+    const auton::AutonSelection sel = auton::currentSelection();
+    const auton::AutonSide side = sel.side;
+    const int count = auton::autonCount(side);
+    const COLORREF color = sideColor(side);
+
+    HFONT font = makeUiFont(15, FW_NORMAL);
+    const bool ownFont = font != nullptr;
+    if (!ownFont) font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    HGDIOBJ oldFont = SelectObject(mem, font);
+    SetBkMode(mem, TRANSPARENT);
+
+    const int pad = 14;
+    int cursor = y + pad;
+    g_drop_rect = RECT{x + pad, cursor, x + w - pad, cursor + kDropH};
+    const COLORREF dropFill = g_hover_drop ? RGB(52, 56, 64) : RGB(40, 44, 50);
+    fillRoundRect(mem, g_drop_rect.left, g_drop_rect.top, g_drop_rect.right, g_drop_rect.bottom,
+                  8, dropFill, color);
+    RECT dropText = g_drop_rect;
+    dropText.left += 14;
+    dropText.right -= 28;
+    drawUiText(mem, dropText, auton::autonSideName(side), RGB(236, 236, 236),
+               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    drawChevron(mem, g_drop_rect.right - 24, g_drop_rect.top + (kDropH - 6) / 2, g_drop_open);
+    cursor += kDropH + 8;
+
+    int listBottom = y + h - pad;
+    if (listBottom < cursor + kRowH) listBottom = cursor + kRowH;
+    g_list_rect = RECT{x + pad, cursor, x + w - pad, listBottom};
+
+    const int visible = (g_list_rect.bottom - g_list_rect.top) / kRowH;
+    const int shown = visible > 0 ? visible : 1;
+    int maxScroll = count - shown;
+    if (maxScroll < 0) maxScroll = 0;
+    if (sel.index < g_list_scroll) g_list_scroll = sel.index;
+    if (count > 0 && sel.index >= g_list_scroll + shown)
+        g_list_scroll = sel.index - shown + 1;
+    if (g_list_scroll < 0) g_list_scroll = 0;
+    if (g_list_scroll > maxScroll) g_list_scroll = maxScroll;
+
+    SaveDC(mem);
+    IntersectClipRect(mem, g_list_rect.left, g_list_rect.top,
+                      g_list_rect.right, g_list_rect.bottom);
+    if (count <= 0) {
+        RECT empty = g_list_rect;
+        empty.left += 8;
+        drawUiText(mem, empty, "No routines", RGB(140, 144, 150),
+                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
+    g_row_n = 0;
+    for (int i = 0; i < shown && g_list_scroll + i < count && g_row_n < kMaxRows; ++i) {
+        const int index = g_list_scroll + i;
+        RECT row{g_list_rect.left, g_list_rect.top + i * kRowH,
+                 g_list_rect.right, g_list_rect.top + (i + 1) * kRowH};
+        g_row_rect[g_row_n] = row;
+        g_row_index[g_row_n] = index;
+        ++g_row_n;
+        const bool on = index == sel.index;
+        const bool hot = index == g_hover_row && !g_drop_open;
+        if (on) {
+            fillRoundRect(mem, row.left, row.top + 2, row.right, row.bottom - 2,
+                          8, sideFill(side), color);
+        } else if (hot) {
+            fillRoundRect(mem, row.left, row.top + 2, row.right, row.bottom - 2,
+                          8, RGB(40, 44, 50), RGB(40, 44, 50));
+        }
+        RECT text = row;
+        text.left += 14;
+        text.right -= 8;
+        drawUiText(mem, text, auton::autonName(side, index),
+                   on ? RGB(246, 246, 246) : RGB(214, 218, 224),
+                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    }
+    RestoreDC(mem, -1);
+
+    if (g_drop_open) {
+        const int menuTop = g_drop_rect.bottom + 4;
+        const int menuH = 3 * kRowH;
+        fillRoundRect(mem, g_drop_rect.left, menuTop, g_drop_rect.right, menuTop + menuH,
+                      8, RGB(36, 40, 46), RGB(78, 84, 94));
+        for (int i = 0; i < 3; ++i) {
+            RECT item{g_drop_rect.left + 4, menuTop + i * kRowH,
+                      g_drop_rect.right - 4, menuTop + (i + 1) * kRowH};
+            g_menu_rect[i] = item;
+            const auto itemSide = static_cast<auton::AutonSide>(i);
+            const bool on = itemSide == side;
+            const bool hot = i == g_hover_menu;
+            if (on || hot) {
+                fillRoundRect(mem, item.left, item.top + 2, item.right, item.bottom - 2,
+                              6, on ? sideFill(itemSide) : RGB(50, 54, 62),
+                              on ? sideColor(itemSide) : RGB(50, 54, 62));
             }
-            SelectObject(mem, oldFont);
+            RECT text = item;
+            text.left += 12;
+            text.right -= 8;
+            drawUiText(mem, text, auton::autonSideName(itemSide), RGB(236, 236, 236),
+                       DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
         }
     }
 
-    cursor += brainH + 18;
-    if (cursor + 48 >= y + h) return;
+    SelectObject(mem, oldFont);
+    if (ownFont) DeleteObject(font);
+}
 
-    drawLabel(mem, originX, cursor, "Controller");
-    cursor += 20;
-    int ctrlH = 108;
-    if (cursor + ctrlH > y + h - 8) ctrlH = y + h - 8 - cursor;
-    if (ctrlH < 36) return;
+bool handleAutonClick(POINT p) {
+    if (g_drop_open) {
+        for (int i = 0; i < 3; ++i) {
+            if (PtInRect(&g_menu_rect[i], p)) {
+                auton::selectSide(static_cast<auton::AutonSide>(i));
+                break;
+            }
+        }
+        g_drop_open = false;
+        return true;
+    }
+    if (PtInRect(&g_drop_rect, p)) {
+        g_drop_open = true;
+        return true;
+    }
+    for (int i = 0; i < g_row_n; ++i) {
+        if (PtInRect(&g_row_rect[i], p)) {
+            auton::selectIndex(g_row_index[i]);
+            return true;
+        }
+    }
+    return false;
+}
 
-    fillRoundRect(mem, originX, cursor, originX + innerW, cursor + ctrlH, 14,
-                  RGB(46, 48, 54), RGB(24, 26, 30));
-    const int cInset = 8;
-    const int cL = originX + cInset;
-    const int cT = cursor + cInset;
-    const int cR = originX + innerW - cInset;
-    const int cB = cursor + ctrlH - cInset;
-    fillRoundRect(mem, cL, cT, cR, cB, 6, RGB(8, 12, 8), RGB(20, 28, 20));
+void drawRoutePreview(HDC mem, int x, int y, int w, int h) {
+    if (w < 40 || h < 40) return;
+    RECT pane{x, y, x + w, y + h};
+    HBRUSH paneBg = CreateSolidBrush(RGB(22, 24, 28));
+    FillRect(mem, &pane, paneBg);
+    DeleteObject(paneBg);
 
-    const char* ctrlLines[devicescreens::kCtrlLines];
-    for (int i = 0; i < devicescreens::kCtrlLines; ++i) ctrlLines[i] = ctrl.lines[i];
-    drawLcdLines(mem, cL + 8, cT + 4, cR - 6, cB - 4, devicescreens::kCtrlLines,
-                 devicescreens::kCtrlCols, RGB(176, 230, 168), ctrlLines);
+    const double margin = 12.0;
+    if (w <= (int)(2.0 * margin) || h <= (int)(2.0 * margin)) return;
+    const double scale = std::min((w - 2.0 * margin) / kFieldIn, (h - 2.0 * margin) / kFieldIn);
+    const double cx = x + w / 2.0;
+    const double cy = y + h / 2.0;
+    const double half = kFieldIn / 2.0;
+    POINT field[4] = {
+        fieldToScreen(-half, kFieldIn, cx, cy, scale),
+        fieldToScreen( half, kFieldIn, cx, cy, scale),
+        fieldToScreen( half, 0.0, cx, cy, scale),
+        fieldToScreen(-half, 0.0, cx, cy, scale),
+    };
+    HBRUSH fieldBrush = CreateSolidBrush(RGB(232, 232, 226));
+    HPEN border = CreatePen(PS_SOLID, 2, RGB(40, 40, 40));
+    HGDIOBJ oldPen = SelectObject(mem, border);
+    HGDIOBJ oldBrush = SelectObject(mem, fieldBrush);
+    Polygon(mem, field, 4);
+    HPEN grid = CreatePen(PS_SOLID, 1, RGB(186, 186, 180));
+    SelectObject(mem, grid);
+    for (int i = 1; i < 6; ++i) {
+        double gx = -half + 24.0 * i;
+        POINT a = fieldToScreen(gx, kFieldIn, cx, cy, scale);
+        POINT b = fieldToScreen(gx, 0.0, cx, cy, scale);
+        MoveToEx(mem, a.x, a.y, nullptr);
+        LineTo(mem, b.x, b.y);
+        double gy = 24.0 * i;
+        POINT c = fieldToScreen(-half, gy, cx, cy, scale);
+        POINT d = fieldToScreen( half, gy, cx, cy, scale);
+        MoveToEx(mem, c.x, c.y, nullptr);
+        LineTo(mem, d.x, d.y);
+    }
+    SelectObject(mem, oldPen);
+    SelectObject(mem, oldBrush);
+    DeleteObject(grid);
+    DeleteObject(border);
+    DeleteObject(fieldBrush);
+    drawGoals(mem, cx, cy, scale);
+    drawPreview(mem, cx, cy, scale);
 }
 
 void paintField(HWND hwnd) {
@@ -344,10 +768,11 @@ void paintField(HWND hwnd) {
         EndPaint(hwnd, &ps);
         return;
     }
-    int panelW = kPanelW;
-    if (panelW > w / 2) panelW = w / 2;
-    if (panelW < 1) panelW = 1;
-    const int fieldW = w - panelW;
+    const int fieldW = w / 2 > 0 ? w / 2 : 1;
+    const int fieldH = h;
+    const int fieldX = 0;
+    const int rightX = fieldW;
+    const int rightW = w - fieldW > 0 ? w - fieldW : 1;
 
     HDC mem = CreateCompatibleDC(dc);
     HBITMAP bmp = CreateCompatibleBitmap(dc, w, h);
@@ -357,14 +782,20 @@ void paintField(HWND hwnd) {
     FillRect(mem, &client, bg);
     DeleteObject(bg);
 
+    ensurePreview();
+
     SaveDC(mem);
-    IntersectClipRect(mem, 0, 0, fieldW, h);
+    IntersectClipRect(mem, fieldX, 0, fieldX + fieldW, fieldH);
 
     const double margin = 48.0;
-    const bool room = (fieldW > (int)(2.0 * margin)) && (h > (int)(2.0 * margin));
+    const bool room = (fieldW > (int)(2.0 * margin)) && (fieldH > (int)(2.0 * margin));
     double scale = 1.0;
-    double cx = fieldW / 2.0;
-    double cy = h / 2.0;
+    double cx = fieldX + fieldW / 2.0;
+    // Keep the tile below the pose readout and above the key line.
+    const int viewTop = 68;
+    const int viewBottom = fieldH - 32;
+    const double viewH = (double)(viewBottom > viewTop ? viewBottom - viewTop : 1);
+    double cy = viewTop + viewH / 2.0;
     HPEN border = nullptr;
     HPEN grid = nullptr;
     HPEN origin = nullptr;
@@ -382,13 +813,13 @@ void paintField(HWND hwnd) {
     HGDIOBJ oldBrush = nullptr;
 
     if (room) {
-        scale = std::min((fieldW - 2.0 * margin) / kFieldIn, (h - 2.0 * margin) / kFieldIn);
+        scale = std::min((fieldW - 2.0 * margin) / kFieldIn, (viewH - 8.0) / kFieldIn);
         const double half = kFieldIn / 2.0;
         POINT field[4] = {
-            fieldToScreen(-half,  half, cx, cy, scale),
-            fieldToScreen( half,  half, cx, cy, scale),
-            fieldToScreen( half, -half, cx, cy, scale),
-            fieldToScreen(-half, -half, cx, cy, scale),
+            fieldToScreen(-half, kFieldIn, cx, cy, scale),
+            fieldToScreen( half, kFieldIn, cx, cy, scale),
+            fieldToScreen( half, 0.0, cx, cy, scale),
+            fieldToScreen(-half, 0.0, cx, cy, scale),
         };
         fieldBrush = CreateSolidBrush(RGB(232, 232, 226));
         border = CreatePen(PS_SOLID, 2, RGB(40, 40, 40));
@@ -400,13 +831,14 @@ void paintField(HWND hwnd) {
         SelectObject(mem, grid);
         const double tile = 24.0;
         for (int i = 1; i < 6; ++i) {
-            double t = -half + tile * i;
-            POINT a = fieldToScreen(t,  half, cx, cy, scale);
-            POINT b = fieldToScreen(t, -half, cx, cy, scale);
+            double x = -half + tile * i;
+            POINT a = fieldToScreen(x, kFieldIn, cx, cy, scale);
+            POINT b = fieldToScreen(x, 0.0, cx, cy, scale);
             MoveToEx(mem, a.x, a.y, nullptr);
             LineTo(mem, b.x, b.y);
-            POINT c = fieldToScreen(-half, t, cx, cy, scale);
-            POINT d = fieldToScreen( half, t, cx, cy, scale);
+            double y = tile * i;
+            POINT c = fieldToScreen(-half, y, cx, cy, scale);
+            POINT d = fieldToScreen( half, y, cx, cy, scale);
             MoveToEx(mem, c.x, c.y, nullptr);
             LineTo(mem, d.x, d.y);
         }
@@ -422,6 +854,8 @@ void paintField(HWND hwnd) {
         LineTo(mem, o1.x, o1.y);
         MoveToEx(mem, o2.x, o2.y, nullptr);
         LineTo(mem, o3.x, o3.y);
+
+        drawGoals(mem, cx, cy, scale);
 
         trailPen = CreatePen(PS_SOLID, 2, RGB(70, 130, 210));
         estTrailPen = CreatePen(PS_SOLID, 2, RGB(230, 150, 40));
@@ -457,7 +891,7 @@ void paintField(HWND hwnd) {
         SelectObject(mem, oldBrush);
     }
 
-    RECT banner{0, 0, fieldW, 64};
+    RECT banner{fieldX, 0, fieldX + fieldW, 64};
     HBRUSH bannerBrush = CreateSolidBrush(RGB(28, 30, 34));
     FillRect(mem, &banner, bannerBrush);
     DeleteObject(bannerBrush);
@@ -469,23 +903,23 @@ void paintField(HWND hwnd) {
     wchar_t line[180];
     int n = std::swprintf(line, 180, L"true  x %+7.1f   y %+7.1f in   h %+6.1f deg",
                           g_truth.x, g_truth.y, g_truth.theta * (180.0 / kPi));
-    if (n > 0) TextOutW(mem, 12, 8, line, n);
+    if (n > 0) TextOutW(mem, fieldX + 12, 8, line, n);
     n = std::swprintf(line, 180, L"est   x %+7.1f   y %+7.1f in   h %+6.1f deg",
                       g_estimate.x, g_estimate.y, g_estimate.theta * (180.0 / kPi));
-    if (n > 0) TextOutW(mem, 12, 26, line, n);
+    if (n > 0) TextOutW(mem, fieldX + 12, 26, line, n);
     double dh = g_estimate.theta - g_truth.theta;
     while (dh > kPi) dh -= 2.0 * kPi;
     while (dh < -kPi) dh += 2.0 * kPi;
     n = std::swprintf(line, 180, L"err   dx %+5.2f   dy %+5.2f   dh %+5.1f    blue true  orange est  green curve",
                       g_estimate.x - g_truth.x, g_estimate.y - g_truth.y, dh * (180.0 / kPi));
-    if (n > 0) TextOutW(mem, 12, 44, line, n);
+    if (n > 0) TextOutW(mem, fieldX + 12, 44, line, n);
     const wchar_t* help =
         L"WASD left stick    arrows right stick    TFGH d-pad    IJKL A/B/X/Y    ZXCV L1/L2/R1/R2";
-    TextOutW(mem, 12, h - 24, help, (int)std::wcslen(help));
+    TextOutW(mem, fieldX + 12, fieldH - 24, help, (int)std::wcslen(help));
     SelectObject(mem, oldFont);
     RestoreDC(mem, -1);
 
-    drawSidePanel(mem, fieldW, 0, panelW, h);
+    drawSidePanel(mem, rightX, 0, rightW, h);
 
     BitBlt(dc, 0, 0, w, h, mem, 0, 0, SRCCOPY);
 
@@ -512,12 +946,60 @@ LRESULT CALLBACK fieldWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_PAINT:
             paintField(hwnd);
             return 0;
-        case WM_LBUTTONDOWN:
-            if (g_brain_w > 0) {
-                POINT p{ (LONG)(short)LOWORD(lp), (LONG)(short)HIWORD(lp) };
-                if (PtInRect(&g_brain_lcd, p)) g_skip_brain = true;
+        case WM_LBUTTONDOWN: {
+            POINT p{ (LONG)(short)LOWORD(lp), (LONG)(short)HIWORD(lp) };
+            if (handleAutonClick(p)) {
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            if (g_brain_w > 0 && PtInRect(&g_brain_lcd, p)) g_skip_brain = true;
+            return 0;
+        }
+        case WM_MOUSEMOVE: {
+            POINT p{ (LONG)(short)LOWORD(lp), (LONG)(short)HIWORD(lp) };
+            int hoverRow = -1;
+            int hoverMenu = -1;
+            const bool hoverDrop = PtInRect(&g_drop_rect, p) != FALSE;
+            if (g_drop_open) {
+                for (int i = 0; i < 3; ++i) {
+                    if (PtInRect(&g_menu_rect[i], p)) hoverMenu = i;
+                }
+            } else {
+                for (int i = 0; i < g_row_n; ++i) {
+                    if (PtInRect(&g_row_rect[i], p)) hoverRow = g_row_index[i];
+                }
+            }
+            if (hoverRow != g_hover_row || hoverMenu != g_hover_menu || hoverDrop != g_hover_drop) {
+                g_hover_row = hoverRow;
+                g_hover_menu = hoverMenu;
+                g_hover_drop = hoverDrop;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            TRACKMOUSEEVENT ev{};
+            ev.cbSize = sizeof(ev);
+            ev.dwFlags = TME_LEAVE;
+            ev.hwndTrack = hwnd;
+            TrackMouseEvent(&ev);
+            return 0;
+        }
+        case WM_MOUSELEAVE:
+            g_hover_row = -1;
+            g_hover_menu = -1;
+            g_hover_drop = false;
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        case WM_MOUSEWHEEL: {
+            POINT p{ (LONG)(short)LOWORD(lp), (LONG)(short)HIWORD(lp) };
+            ScreenToClient(hwnd, &p);
+            if (PtInRect(&g_list_rect, p)) {
+                const int delta = (int)(short)HIWORD(wp);
+                if (delta > 0) --g_list_scroll;
+                else if (delta < 0) ++g_list_scroll;
+                if (g_list_scroll < 0) g_list_scroll = 0;
+                InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
+        }
         case WM_DESTROY:
             g_hwnd = nullptr;
             PostQuitMessage(0);
@@ -542,7 +1024,7 @@ void ensureFieldWindow() {
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     RegisterClassW(&wc);
 
-    RECT r{0, 0, kFieldPx + kPanelW, kFieldPx};
+    RECT r{0, 0, kPaneW * 2, kWindowH};
     DWORD style = WS_OVERLAPPEDWINDOW;
     AdjustWindowRect(&r, style, FALSE);
     g_hwnd = CreateWindowW(
@@ -618,6 +1100,22 @@ void run() {
     }
 }
 
+void setMechanisms(const SubsystemCommand& cmd, double cascade_frac,
+                   const CascadeReading& sense, const char* score_phase) {
+    g_intake_pct = cmd.intake_pct;
+    g_cascade_pct = cmd.cascade_pct;
+    g_pneu_g = cmd.pneumatics_g_state;
+    g_pneu_b = cmd.pneumatics_b_state;
+    if (cascade_frac < 0.0) cascade_frac = 0.0;
+    if (cascade_frac > 1.0) cascade_frac = 1.0;
+    g_cascade_frac = cascade_frac;
+    g_cascade_deg = sense.position_deg;
+    g_cascade_rpm = sense.velocity_rpm;
+    g_cascade_amps = sense.current_amps;
+    if (score_phase == nullptr || score_phase[0] == '\0') score_phase = "Idle";
+    std::snprintf(g_score_phase, sizeof(g_score_phase), "%s", score_phase);
+}
+
 void setBrainFrame(const std::uint32_t* rgb, int width, int height) {
     if (rgb == nullptr || width <= 0 || height <= 0) {
         g_brain_w = 0;
@@ -659,7 +1157,9 @@ bool pump(std::uint32_t hold_ms) {
             DispatchMessageW(&msg);
         }
         if (g_hwnd == nullptr) std::exit(0);
-        if (g_skip_brain || (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0) return false;
+        // Z X C V are L1 L2 R2 R1. All four skip the clip, same as the robot.
+        const bool shoulders = keyDown('Z') && keyDown('X') && keyDown('C') && keyDown('V');
+        if (g_skip_brain || shoulders || (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0) return false;
         const ULONGLONG now = GetTickCount64();
         if (now >= deadline) return true;
         const ULONGLONG left = deadline - now;

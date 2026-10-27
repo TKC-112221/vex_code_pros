@@ -1,8 +1,11 @@
 #pragma once
 /* ---------------------------------------------------------------------------
- * FieldWindow  --  desktop field view, plus the V5 brain and controller
- * screens in a panel beside it. The host link provides the Win32
- * implementation. The V5 image does not compile this directory.
+ * FieldWindow  --  desktop field view. The host window stacks the autonomous
+ * selector over a preview of the selected route, and puts the live
+ * simulation beside that column. The V5 brain, the controller, and the
+ * subsystem states stay on the far side of the simulation. The V5 image
+ * does not compile this directory; the brain draws its own selector beside
+ * the route preview.
  * ------------------------------------------------------------------------- */
 
 #include "core/Types.h"
@@ -27,6 +30,11 @@ void setFollowPath(const Pose2d* points, int count, bool active);
 // Brain LCD contents, 0x00RRGGBB, row-major from the top. Copied. nullptr
 // clears it so the panel shows LLEMU text again.
 void setBrainFrame(const std::uint32_t* rgb, int width, int height);
+
+// Live mechanism state for the side panel. cascade_frac is 0 at the bottom
+// stop and 1 at the top. score_phase is copied. nullptr reads as Idle.
+void setMechanisms(const SubsystemCommand& cmd, double cascade_frac,
+                   const CascadeReading& sense, const char* score_phase);
 
 // Create the window on the calling thread. The pipeline may draw into it
 // afterwards, but it must not be the thread that creates it.

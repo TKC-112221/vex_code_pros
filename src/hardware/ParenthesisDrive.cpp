@@ -5,18 +5,15 @@
  * side traction wheels and overrides the 6-wheel mix and the odometry source.
  * ------------------------------------------------------------------------- */
 #include "hardware/ParenthesisDrive.h"
+#include "hardware/DeviceRead.h"
 #include "config/Ports.h"
 #include "config/Settings.h"
 #include "core/Specs.h"
-#include "math/MathUtils.h"
 #include <cmath>
 
 static constexpr double SQRT2 = 1.4142135623730951;
 
-static inline std::int32_t voltsToMv(double volts) {
-    double mv = mathutil::clamp_val(volts * 1000.0, -12000.0, 12000.0);
-    return static_cast<std::int32_t>(mv);
-}
+static inline std::int32_t voltsToMv(double volts) { return devread::voltsToMv(volts); }
 
 ParenthesisDrive::ParenthesisDrive(double max_volts, bool scale_battery)
     : XDrive(max_volts, scale_battery) {
@@ -40,37 +37,46 @@ void ParenthesisDrive::stop() {
     side_r_->move_voltage(0);
 }
 
+static double wheelDelta(pros::Motor& motor, double& prev_m, bool& have) {
+    double deg = 0.0;
+    if (!devread::motorDegrees(motor, deg)) return 0.0;
+    return devread::travelMeters(deg, prev_m, have);
+}
+
+static double finiteRpm(pros::Motor& motor) {
+    const double rpm = motor.get_actual_velocity();
+    return devread::finite(rpm) ? rpm : 0.0;
+}
+
 ChassisObservation ParenthesisDrive::readObservation(double prev_heading_rad) {
     ChassisObservation o;
+    bool gap = false;
+    o.sample_dt = takeSampleDt(gap);
+    if (gap) { have_sl_ = false; have_sr_ = false; }
 
-    // Forward distance/speed from the forward-facing side wheels (no 45 deg factor).
-    double csl = (side_l_->get_position() / 360.0) * Robot::METERS_PER_TURN;
-    double csr = (side_r_->get_position() / 360.0) * Robot::METERS_PER_TURN;
-    double dsl = csl - prev_sl_, dsr = csr - prev_sr_;
-    prev_sl_ = csl; prev_sr_ = csr;
+    const double dsl = wheelDelta(*side_l_, prev_sl_, have_sl_);
+    const double dsr = wheelDelta(*side_r_, prev_sr_, have_sr_);
     o.forward_delta = (dsl + dsr) / 2.0;
-    o.v_lin = (side_l_->get_actual_velocity() + side_r_->get_actual_velocity()) / 2.0 * Robot::RPM_TO_MPS;
+    const double rpm_l = finiteRpm(*side_l_);
+    const double rpm_r = finiteRpm(*side_r_);
+    o.v_lin = (rpm_l + rpm_r) / 2.0 * Robot::RPM_TO_MPS;
 
-    // Strafe from the corner omnis (advance corner baselines to stay consistent).
-    double cfl = (fl_->get_position() / 360.0) * Robot::METERS_PER_TURN;
-    double cfr = (fr_->get_position() / 360.0) * Robot::METERS_PER_TURN;
-    double cbl = (bl_->get_position() / 360.0) * Robot::METERS_PER_TURN;
-    double cbr = (br_->get_position() / 360.0) * Robot::METERS_PER_TURN;
-    double dfl = cfl - prev_fl_, dfr = cfr - prev_fr_, dbl = cbl - prev_bl_, dbr = cbr - prev_br_;
-    prev_fl_ = cfl; prev_fr_ = cfr; prev_bl_ = cbl; prev_br_ = cbr;
+    const double dfl = wheelDelta(*fl_, prev_fl_, have_fl_);
+    const double dfr = wheelDelta(*fr_, prev_fr_, have_fr_);
+    const double dbl = wheelDelta(*bl_, prev_bl_, have_bl_);
+    const double dbr = wheelDelta(*br_, prev_br_, have_br_);
     o.strafe_delta = SQRT2 * (dfr + dbl - dfl - dbr) / 4.0;
 
     fillImuChannels(prev_heading_rad, o);
 
-    // Log channels: the side wheels are the natural left/right references.
-    o.left_pos_deg  = side_l_->get_position();
-    o.right_pos_deg = side_r_->get_position();
-    o.left_vel_rpm  = side_l_->get_actual_velocity();
-    o.right_vel_rpm = side_r_->get_actual_velocity();
-    o.left_current_amps  = side_l_->get_current_draw() / 1000.0;
-    o.right_current_amps = side_r_->get_current_draw() / 1000.0;
-    o.left_temp_c  = side_l_->get_temperature();
-    o.right_temp_c = side_r_->get_temperature();
+    o.left_pos_deg  = have_sl_ ? prev_sl_ / Robot::METERS_PER_TURN * 360.0 : 0.0;
+    o.right_pos_deg = have_sr_ ? prev_sr_ / Robot::METERS_PER_TURN * 360.0 : 0.0;
+    o.left_vel_rpm  = rpm_l;
+    o.right_vel_rpm = rpm_r;
+    o.left_current_amps  = devread::motorAmps(*side_l_);
+    o.right_current_amps = devread::motorAmps(*side_r_);
+    o.left_temp_c  = devread::motorTempC(*side_l_);
+    o.right_temp_c = devread::motorTempC(*side_r_);
     return o;
 }
 

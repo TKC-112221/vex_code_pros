@@ -1,0 +1,8 @@
+name: cpp_env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - ninja
+  - cmake
+  - clangxx

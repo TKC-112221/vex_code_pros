@@ -6,10 +6,13 @@
  * Wiring lives in Ports.h. Feature flags live in Settings.h. The Python
  * path follower and the MockDrive plant have their own parameter files.
  *
+ * USE_TUNING_PASTE swaps the searched knobs for python/tuning_paste.txt.
  * Generated accel ceilings come from data/generated_limits.h. The fallback
- * below is used only when that file is absent.
+ * below is used only when that file is absent. With the paste flag on,
+ * TURN_RADIUS_MAX_M is the literal from the paste.
  * ------------------------------------------------------------------------- */
 
+#include "config/Settings.h"
 #include "core/Specs.h"
 #include "core/Types.h"
 
@@ -68,6 +71,50 @@ namespace Pivot {
     constexpr double MAX_VOLTAGE  = 10.0;
 }
 
+// Goal lock. The drive attaches when the front edge comes within
+// FRONT_TOUCH_M of a goal point. Forward is dropped. The yaw stick is
+// the orbit rate about that point, capped at MAX_YAW_RAD_S. Reverse
+// lets go.
+namespace GoalAlign {
+    constexpr double FRONT_TOUCH_M = 0.04;
+    constexpr double MAX_YAW_RAD_S = 3.0;
+    constexpr double VEL_DEADBAND = 0.04;
+    // Square the nose onto the point after a touch. The time constant is
+    // short so the bumper centers as it arrives, then the yaw stick takes over.
+    constexpr double CENTER_TAU_SEC = 0.08;
+    constexpr double CENTER_POS_M = 0.003;
+    constexpr double CENTER_HEAD_RAD = 0.02;
+    // Latched swing. Surge presses the bumper into the point. Yaw sweeps the
+    // heading. Their sum is the rail, and surge stays the larger one: the
+    // inside wheel is surge - yaw, and a negative inside wheel backs the
+    // bumper off the goal. The yaw volts follow the brake curve up to
+    // TURN_YAW_RAD_S, so a short remainder does not keep the full turn.
+    constexpr double TURN_SURGE_V = 7.0;
+    constexpr double TURN_YAW_V = 5.0;
+    constexpr double TURN_YAW_RAD_S = 6.0;
+    constexpr double TURN_YAW_ACCEL = 8.0;
+    constexpr double TURN_SETTLE_RAD_S = 0.25;
+}
+
+// Bumper impact used as a pose fix. A linear specific-force spike past
+// DECEL_G, while the front edge was still moving, seats the front center
+// on the nearest goal along that edge. Heading is kept. The spike is not
+// required to lie on the forward axis: a yawing hit stops the bumper
+// sideways. A forward accel above LAUNCH_G is a launch, not a stop.
+// Drivetrain braking stays below DECEL_G; a clipped hit reaches the
+// inertial sensor's ±4 g rail.
+namespace GoalBump {
+    constexpr double DECEL_G = 3.0;
+    constexpr double LAUNCH_G = 1.0;
+    constexpr double APPROACH_MPS = 0.15;
+    constexpr double LOOKAHEAD_M = 0.35;
+    // Estimate overshoot while yawing. The goal can sit this far behind
+    // the front edge and still be the bumper that just stopped.
+    constexpr double BEHIND_M = 0.15;
+    constexpr double SEATED_M = 0.02;
+    constexpr std::uint32_t REFRACTORY_MS = 400;
+}
+
 namespace Replay {
     constexpr double WHEEL_LIN_KP = 2.0;
     constexpr double WHEEL_ANG_KP = 0.5;
@@ -99,10 +146,17 @@ namespace Boomerang {
         double slew;
     };
 
+#if USE_TUNING_PASTE
+#define TUNING_PASTE_PART 7
+#include "data/tuning_paste.inc"
+#else
     constexpr Axis Lateral = {10, 0, 3, 3, 1, 100, 3, 500, 5};
-    constexpr Axis Angular = {1, 0, 0, 3, 1, 100, 3, 500, 0};
-
-    constexpr double CLOSE_IN = 7.5;
+    // Heading trim, LemLib power units (127 is 12 V). Two power per degree,
+    // light damping, no integral. DriftFollower reads these four.
+    constexpr Axis Angular = {2, 0, 0.5, 3, 1, 100, 3, 500, 0};
+    // Square up inside this many inches of a stop goal.
+    constexpr double CLOSE_IN = 6.0;
+#endif
     constexpr double CLOSE_MIN_POWER = 60.0;
     constexpr double CROSS_TRACK_IN = 4.0;
 }
@@ -113,12 +167,18 @@ namespace Physics {
     constexpr double MAX_ACCEL_ANG     = Limits::MAX_ACCEL_ANG;
     constexpr double SLEW_STEP_LIN     = Limits::SLEW_STEP_LIN;
     constexpr double SLEW_STEP_ANG     = Limits::SLEW_STEP_ANG;
-    constexpr double TURN_RADIUS_MAX_M = Limits::TURN_RADIUS_MAX_M;
 #else
     constexpr double MAX_ACCEL_LIN     = 2.0;
     constexpr double MAX_ACCEL_ANG     = 8.0;
     constexpr double SLEW_STEP_LIN     = 0.02;
     constexpr double SLEW_STEP_ANG     = 0.08;
+#endif
+#if USE_TUNING_PASTE
+#define TUNING_PASTE_PART 6
+#include "data/tuning_paste.inc"
+#elif __has_include("data/generated_limits.h")
+    constexpr double TURN_RADIUS_MAX_M = Limits::TURN_RADIUS_MAX_M;
+#else
     constexpr double TURN_RADIUS_MAX_M = 10.0;
 #endif
     // Yaw rate below this is treated as straight for the turn-radius clamp.
@@ -126,25 +186,38 @@ namespace Physics {
 }
 
 namespace Motion {
+#if USE_TUNING_PASTE
+#define TUNING_PASTE_PART 4
+#include "data/tuning_paste.inc"
+#else
     // Smallest path acceleration the speed planner will use, m/s^2.
-    constexpr double MIN_ACCEL_MPS2 = 0.05;
-    // |speed - exit speed| inside this counts as settled, m/s.
-    constexpr double SETTLE_SPEED_MPS = 0.2;
+    constexpr double MIN_ACCEL_MPS2 = 0.15;
     // |kappa| below this is a straight line when picking a turn radius.
     constexpr double KAPPA_EPS = 1e-3;
+#endif
+    // |speed - exit speed| inside this counts as settled, m/s.
+    constexpr double SETTLE_SPEED_MPS = 0.2;
 }
 
-// Armature volts = kS sgn(v) + kV v + kA a. Angular gains were fit on an
-// older chassis; ANG_LEVER_M is that fit, not Robot::Chassis::TRACK_WIDTH_M.
+// Armature volts = kS sgn(v) + kV v + kA a.
+// The defaults follow this chassis. Free speed is Robot::MAX_VEL_LIN, and
+// 6 m/s^2 is a 6-motor 600 rpm stall with a dressed robot. Yaw volts are
+// V_R − V_L, so kV and kA are the linear model taken across the track.
+// ANG_KA_COEFF uses motor_count / 2, and ANG_KA_MOTOR_COUNT below is 6.
 namespace Feedforward {
-    constexpr double KS_LIN = 0.2;
-    constexpr double KS_ANG = 0.2;
-    constexpr double LIN_SPEED_AT_SAT = 4.0;
-    constexpr double LIN_ACCEL_AT_FULL_V = 5.0;
-    constexpr double ANG_RATE_PER_VOLT = 4.72;
-    constexpr double ANG_LEVER_M = 0.3556;
-    constexpr double ANG_KA_COEFF = 2.4;
-    constexpr double ANG_KA_LENGTH_M = 0.1652;
+#if USE_TUNING_PASTE
+#define TUNING_PASTE_PART 2
+#include "data/tuning_paste.inc"
+#else
+    constexpr double KS_LIN = 0.6;
+    constexpr double KS_ANG = 1.2;
+    constexpr double LIN_SPEED_AT_SAT = Robot::MAX_VEL_LIN;
+    constexpr double LIN_ACCEL_AT_FULL_V = 6.0;
+    constexpr double ANG_LEVER_M = Robot::Chassis::TRACK_WIDTH_M;
+    constexpr double ANG_RATE_PER_VOLT = 2.0 * (System::MAX_VOLTS - KS_LIN) / LIN_SPEED_AT_SAT;
+    constexpr double ANG_KA_LENGTH_M = ANG_LEVER_M;
+    constexpr double ANG_KA_COEFF = (System::MAX_VOLTS / LIN_ACCEL_AT_FULL_V) * ANG_LEVER_M * 3.0;
+#endif
     constexpr double ANG_KA_MOTOR_COUNT = 6.0;
 
     constexpr double KV_LIN = (System::MAX_VOLTS - KS_LIN) / LIN_SPEED_AT_SAT;
@@ -157,17 +230,31 @@ namespace Feedforward {
 namespace Drift {
     constexpr double EXP_RATE = -2.0;
     constexpr double DRIFT_ACCEL = 5.5;
-    constexpr double PATH_ACCEL = 2.0;
-    constexpr double MAX_SLIP_RAD = Robot::PI / 2.0;
+    // Lateral accel the timed profile may spend, m/s^2. v²|κ| stays under this.
+    constexpr double CENTRIPETAL_ACCEL = 6.0;
+    // Scales the soft speed caps (centripetal, yaw accel, path accel). 1 keeps
+    // the tracking budget. Higher spends more of it and holds more speed.
+    constexpr double SPEED_REWARD = 2.0;
+#if USE_TUNING_PASTE
+#define TUNING_PASTE_PART 3
+#include "data/tuning_paste.inc"
+#else
+    // Brisk enough for a skills leg, slow enough for the 10 ms loop to track.
+    constexpr double PATH_ACCEL = 3.0;
+    // Sideslip in the heading model decays in about a quarter second.
+    constexpr double K_SLIP = 4.0;
+    constexpr double A_MAX = 8.0;
+    // Nose lead stays inside about 35 degrees. Past that the lateral loop steers.
+    constexpr double MAX_SLIP_RAD = 0.6;
+    // Volts per meter of cross-track, and the derivative in V per (m/s).
+    constexpr double LAT_KP = 4.0;
+    constexpr double LAT_KI = 0.2;
+    constexpr double LAT_KD = 0.3;
+    constexpr double LAT_KD2 = 0.0;
+    constexpr double LAT_I_LIMIT = 1.0;
+#endif
     constexpr double BOOMERANG_LEAD = 1.0;
     constexpr double BOOMERANG_MAX_SLIP = 0.7;
-    constexpr double K_SLIP = 3.0;
-    constexpr double A_MAX = 8.0;
-    constexpr double LAT_KP = 0.0;
-    constexpr double LAT_KI = 0.0;
-    constexpr double LAT_KD = 0.0;
-    constexpr double LAT_KD2 = 0.0;
-    constexpr double LAT_I_LIMIT = 1.5;
     constexpr double PROBE_M = 0.01;
     constexpr double CARROT_FLOOR_M = 0.05;
     constexpr int CURVE_STEPS = 40;
@@ -187,12 +274,17 @@ namespace Turn {
 
 // Button A practice drive, and the accel the plant binding uses for a guide.
 namespace Practice {
-    constexpr double GOAL_X_M = 1.0;
-    constexpr double GOAL_Y_M = 0.0;
-    constexpr double GOAL_HEADING_RAD = 0.0;
-    constexpr double EXIT_SPEED_MPS = 20.0;
-    constexpr double MAX_ACCEL_MPS2 = 6.0;
-    constexpr double LINE_LENGTH_M = 0.5;
+    constexpr double GOAL_X = 0.0;
+    constexpr double GOAL_Y = 36.0;
+    constexpr double GOAL_HEADING_RAD = Robot::PI / 2.0;
+    constexpr double EXIT_SPEED_MPS = 2.0;
+#if USE_TUNING_PASTE
+#define TUNING_PASTE_PART 5
+#include "data/tuning_paste.inc"
+#else
+    constexpr double MAX_ACCEL_MPS2 = 4.0;
+#endif
+    constexpr double LINE_LENGTH = 0.5;
 }
 
 namespace driftpath {
@@ -204,6 +296,31 @@ namespace driftpath {
     inline constexpr double kGraphAlongMin = 0.1736;
     inline constexpr double kGraphSlopeMax = 5.671;
     inline constexpr int kLengthSteps = 32;
+    // Timed elastic band. Poses include the pinned ends. The hard curvature
+    // cap is the tightest bend the band may keep while the speed is still low.
+    inline constexpr int kTebPoses = 13;
+    inline constexpr int kTebIters = 16;          // one tick, seeded again from the base polyline
+    inline constexpr int kTebWarmIters = 8;       // a tick that continues a band already in hand
+    inline constexpr int kTebObstacles = 4;
+    inline constexpr double kTebMinSegM = 0.04;
+    // Steering look for the committed band. The Hermite floor is 0.30 m,
+    // which sits past the first free knot, so the command would track a
+    // part of the curve the robot has already left.
+    inline constexpr double kTebLookMin = 0.10;
+    inline constexpr double kTebKappaHard = 8.0;
+    // Time-optimality step on a segment's Δt, seconds per pass. The kinematic
+    // floor stops the step. Obstacle weight is the fraction of the penetration
+    // pushed out in one pass. Biharmonic gain fair-curves the free poses.
+    inline constexpr double kTebTimeStep = 0.015;
+    inline constexpr double kTebObstacleWeight = 0.55;
+    inline constexpr double kTebBiharmonic = 0.16;
+    // Third derivative of the slipped heading, rad/s³. The band walks a free
+    // pose down that jerk. 40 rad/s³ is an 8 rad/s² yaw accel changing over
+    // 0.2 s, about as fast as the drift feedforward can be tracked. The step
+    // is one pass, in meters, and it scales down when the jerk is already small.
+    inline constexpr double kTebYawJerk = 40.0;
+    inline constexpr double kTebJerkStep = 0.012;
+    inline constexpr int kSpeedKnots = 64;
 }
 
 // Feature scales and the settle window. Layer sizes stay with the actor.
@@ -215,12 +332,11 @@ namespace DrivePolicy {
     constexpr double kSpeedToleranceMps = Motion::SETTLE_SPEED_MPS;
     constexpr double kHeadingToleranceRad = 5.0 * Robot::PI / 180.0;
     constexpr double kDepartMarginIn = 18.0;
-    // Below this, velocity heading falls back to the chassis nose, m/s.
-    constexpr double kStoppedSpeedMps = 0.05;
 }
 
 namespace WallNudge {
-    constexpr double ODOM_GAIN = 0.15;
+    // Fraction of the wall-range fix kept each distance-sensor period.
+    constexpr double ODOM_GAIN = 0.05;
     constexpr double STEP_M = 0.04;
     constexpr double GATE_M = 0.20;
 }
@@ -298,8 +414,10 @@ namespace ImuBias {
 }
 
 namespace SensorFilter {
-    constexpr int SAVITZKY_WINDOW = 11;
-    constexpr int SAVITZKY_DEGREE = 2;
+    // 21 ticks is 210 ms. Degree 1 holds a steady rate and averages a
+    // change in acceleration across that window.
+    constexpr int SAVITZKY_WINDOW = 21;
+    constexpr int SAVITZKY_DEGREE = 1;
     constexpr int KALMAN_WINDOW = 3;
 }
 

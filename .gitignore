@@ -15,3 +15,8 @@ temp.log
 temp.errors
 *.ini
 .d/
+
+.env/
+python/.env/
+data/
+VEX/

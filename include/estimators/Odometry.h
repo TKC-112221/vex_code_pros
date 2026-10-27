@@ -7,13 +7,15 @@
  * ------------------------------------------------------------------------- */
 
 #include "core/Types.h"
+#include "core/Specs.h"
 #include "math/MathUtils.h"
 #include <cmath>
 
 class Odometry {
 public:
     // Meters. OdometryEstimator converts to inches when it publishes.
-    Pose2d pose;
+    // The default pose is the geometric center of the field.
+    Pose2d pose{Robot::Range::CENTER_X_M, Robot::Range::CENTER_Y_M, 0.0};
 
     // forward_delta: meters travelled along heading since last call
     // strafe_delta : meters travelled sideways (left +); 0 for a differential drive

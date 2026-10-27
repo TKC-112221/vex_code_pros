@@ -1,9 +1,10 @@
 #pragma once
 /* ---------------------------------------------------------------------------
  * MacroController  --  button macros not tied to the drive target: the
- * four-trigger replay abort, and the subsystem behavior (intake/roller mixing
- * plus latching pneumatics with a post-abort debounce). Owns the authoritative
- * pneumatics state and emits a drivebase-agnostic SubsystemCommand.
+ * four-trigger replay abort, and the subsystem behavior. R1/R2 run the intake
+ * (MAIN1 and MAIN2 opposite). L1/L2 run the cascade (both the same way).
+ * L1+L2 toggles the claw (pneumatic B). R1+R2 toggles pneumatic G. D-pad
+ * Right starts the scoring macro. Owns the pneumatics latch.
  * ------------------------------------------------------------------------- */
 
 #include "core/Types.h"
@@ -25,6 +26,10 @@ public:
     SubsystemCommand decodeRecorded(uint8_t bitmask) const override;
 
     SubsystemIntent subsystemIntent() const override { return intent_; }
+    void setPneumaticB(bool engaged) override {
+        b_state_ = engaged;
+        intent_.pneumatic_b = engaged;
+    }
 
 private:
     void captureIntent(bool r1, bool r2, bool l1, bool l2);

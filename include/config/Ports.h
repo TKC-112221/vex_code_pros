@@ -26,10 +26,13 @@ namespace Ports {
     constexpr int D3 = 19;
     constexpr int D4 = 20;
 
-    // Subsystems (smart ports)
-    constexpr int INTAKE        = 4;
-    constexpr int ROLLER_TOP    = 5;
-    constexpr int ROLLER_BOTTOM = 8;
+    // Subsystems (smart ports).
+    // MAIN1 and MAIN2 share a differential: the same spin powers the cascade,
+    // the opposite spin powers the intake. SUB1 and SUB2 are held off.
+    constexpr int MAIN1 = 4;
+    constexpr int MAIN2 = 5;
+    constexpr int SUB1  = 8;
+    constexpr int SUB2  = 9;
 
     // Pneumatics (ADI ports: 'A'=1 ... 'H'=8)
     constexpr int PNEUMATICS_G = 7;   // 'G'

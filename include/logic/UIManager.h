@@ -21,6 +21,7 @@ public:
     // While false, status text is not painted on the brain. The startup clip
     // owns that screen; the controller lines still update.
     void setBrainUpdates(bool on);
+    bool brainUpdates() const { return brain_updates_.load(); }
 
     // Advance record/debug toggles; returns the (possibly new) mode.
     RobotMode processStateToggles(const ButtonState& btn, RobotMode mode) override;
@@ -31,7 +32,12 @@ public:
     bool checkAutonTestRequested(const ButtonState& btn) override;            // Y edge
 
     void updateDisplay(RobotMode mode, const Pose2d& pose, double total_heading,
-                       int frame_count) override;
+                       int frame_count, bool recording) override;
+
+    // Send at most one queued controller line. On the V5 this runs off the
+    // control task: controller_print blocks on the radio. The host print
+    // is a memory write and stays on the pipeline.
+    void serviceController();
 
     bool debugEnabled() const override { return debug_; }
 

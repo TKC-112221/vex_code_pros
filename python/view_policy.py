@@ -33,7 +33,6 @@ DEFAULT_CHECKPOINT = HERE / "drive_policy.zip"
 _INCHES_PER_METER = 1.0 / 0.0254
 _BODY_LENGTH_IN = 0.38 * _INCHES_PER_METER
 _TRACK_WIDTH_IN = 0.27051 * _INCHES_PER_METER
-_HALF_IN = float(plant.FIELD_HALF_IN)
 
 
 def chassis_corners(x, y, theta):
@@ -80,19 +79,21 @@ def rollout(model, seed):
 def draw_field(ax):
     ax.set_aspect("equal")
     pad = 8.0
-    ax.set_xlim(-_HALF_IN - pad, _HALF_IN + pad)
-    ax.set_ylim(-_HALF_IN - pad, _HALF_IN + pad)
+    x0 = float(plant.FIELD_X_MIN_IN)
+    y0 = float(plant.FIELD_Y_MIN_IN)
+    size = float(plant.FIELD_SIZE_IN)
+    ax.set_xlim(x0 - pad, x0 + size + pad)
+    ax.set_ylim(y0 - pad, y0 + size + pad)
     ax.set_xlabel("x (in)")
     ax.set_ylabel("y (in)")
-    ticks = np.arange(-_HALF_IN, _HALF_IN + 1.0, 24.0)
-    ax.set_xticks(ticks)
-    ax.set_yticks(ticks)
+    ax.set_xticks(np.arange(x0, x0 + size + 1.0, 24.0))
+    ax.set_yticks(np.arange(y0, y0 + size + 1.0, 24.0))
     ax.grid(True, color="#d5d5d5", linewidth=0.6)
     ax.add_patch(
         Rectangle(
-            (-_HALF_IN, -_HALF_IN),
-            2 * _HALF_IN,
-            2 * _HALF_IN,
+            (x0, y0),
+            size,
+            size,
             fill=False,
             edgecolor="#222222",
             linewidth=1.5,
@@ -182,6 +183,7 @@ def main():
     if args.episodes < 1:
         raise SystemExit("--episodes must be at least 1")
 
+    import train_drive_policy  # noqa: F401  (checkpoint names this policy class)
     model = SAC.load(args.checkpoint, device="cpu")
     episodes = []
     for index in range(args.episodes):

@@ -2,34 +2,33 @@
 /* ---------------------------------------------------------------------------
  * DrivePolicy  --  a small actor that follows a path's thrust and heading.
  *
- * Output is CommandVector, the universal chassis command in volts:
- *   surge = vx,  sway = vy,  yaw = omega.
- * applyDrive consumes that vector unchanged. On this differential chassis
- * sway is unused by the plant; the action is still there so a holonomic
- * mapper can take the same network.
+ * Output is CommandVector. This chassis is differential: the actor
+ * commands surge and yaw only, and sway is left at zero. applyDrive
+ * ignores a lateral voltage. command() applies tanh and scales the two
+ * outputs to ±System::MAX_VOLTS.
  *
- * The actor is features -> 32 -> 32 -> 3, ReLU hidden, linear output.
- * command() applies tanh and scales to ±System::MAX_VOLTS, which is the
- * deterministic soft-actor-critic action. init() copies
- * include/control/DrivePolicyWeights.h. The pose-task table does not match
- * this input; re-export after training.
+ * The actor is features -> 64 -> 64 -> 2, SiLU hidden, linear output.
+ * init() copies include/control/DrivePolicyWeights.h. Re-export after
+ * training; a table from the 32-wide ReLU net does not load.
  *
- * Features, in order, all dimensionless. The direction is the path tangent
- * a short distance ahead, minus the direction the robot is actually moving
- * (its nose, when it is stopped). The two derivatives are of that path
- * tangent with respect to arc length, so a straight reads as zero, zero.
- *   0  previous surge command, in [-1, 1]
- *   1  previous sway command
- *   2  previous yaw command
- *   3  sin(path tangent − velocity heading)
- *   4  cos(path tangent − velocity heading)
- *   5  dφ/ds / kKappaUnitPerIn. φ is the path tangent, s is inches
- *   6  d²φ/ds² / kKappaRateUnit
- *   7  target thrust in [0, 1]. 1 is full throttle
- *   8  signed cross-track / kCrossUnitIn. Left of travel is positive
- * Target thrust and cross-track are not derivatives of the direction. The
- * thrust schedule is independent of the shape, and the cross-track is the
- * only signal that says which way to steer back after a drift.
+ * Features, all dimensionless and clamped to [-1, 1]. Six history frames,
+ * newest first, at the lags in kHistoryLag (10 ms ticks). Each frame holds:
+ *   0  forward speed / MAX_VEL_LIN
+ *   1  lateral speed / MAX_VEL_LIN. Left is positive
+ *   2  yaw rate / MAX_VEL_ANG
+ *   3  previous surge command, in [-1, 1]
+ *   4  previous yaw command, in [-1, 1]
+ * Speeds are m/s and rad/s on the way in. The commands are the normalized
+ * actions, not volts. The commands are already their own channels, so the
+ * speeds are not pre-subtracted from them.
+ *
+ * After the six frames:
+ *   sin and cos of (path tangent at 0.2 m − chassis heading). The heading
+ *   is the body, not the velocity direction, so it stays defined at rest.
+ *   body-frame (x, y) of the path at 0.2, 0.5, 1.0, and 1.5 m ahead,
+ *   each divided by its own station distance. +x is forward, +y is left
+ *   target thrust in [0, 1]
+ *   tanh(signed cross-track / kCrossUnitIn). Left of travel is positive
  * ------------------------------------------------------------------------- */
 
 #include "control/DriftCurve.h"
@@ -38,34 +37,54 @@
 
 namespace DrivePolicy {
 
-constexpr int kPrevSurge = 0;
-constexpr int kPrevSway = 1;
-constexpr int kPrevYaw = 2;
-constexpr int kDirSin = 3;
-constexpr int kDirCos = 4;
-constexpr int kDPhiDs = 5;
-constexpr int kD2PhiDs2 = 6;
-constexpr int kTargetThrust = 7;
-constexpr int kCrossTrack = 8;
-constexpr int kFeatures = 9;
-constexpr int kHidden = 32;
-constexpr int kOutputs = 3;
+constexpr int kHistory = 6;
+constexpr int kHistoryChannels = 5;
+constexpr int kHistSurge = 0;
+constexpr int kHistSway = 1;
+constexpr int kHistYaw = 2;
+constexpr int kHistSurgeCmd = 3;
+constexpr int kHistYawCmd = 4;
+// Ticks of age for the six frames. The loop is 10 ms, so the last tap is
+// 300 ms: one velocity lag and the nominal skid lag, with the newest
+// three samples still a tick apart.
+constexpr int kHistoryLag[kHistory] = {0, 1, 2, 5, 12, 30};
+constexpr int kHistoryDepth = kHistoryLag[kHistory - 1] + 1;
+
+constexpr int kLookahead = 4;
+constexpr double kLookaheadM[kLookahead] = {0.2, 0.5, 1.0, 1.5};
+// Farthest station. Each point is scaled by its own kLookaheadM entry.
+constexpr double kLookNormM = 1.5;
+
+constexpr int kHistoryFeatures = kHistory * kHistoryChannels;
+constexpr int kDirSin = kHistoryFeatures;
+constexpr int kDirCos = kDirSin + 1;
+constexpr int kLookStart = kDirCos + 1;
+constexpr int kTargetThrust = kLookStart + kLookahead * 2;
+constexpr int kCrossTrack = kTargetThrust + 1;
+constexpr int kFeatures = kCrossTrack + 1;
+constexpr int kHidden = 64;
+constexpr int kOutputs = 2;
 constexpr int kLayerCount = 4;
 constexpr int kLayerSizes[kLayerCount] = {kFeatures, kHidden, kHidden, kOutputs};
 
 // Scales and the settle window are DrivePolicy:: in core/Tuning.h.
 
-// Everything read() needs for one tick. Angles are radians. dphi_ds is
-// rad per inch and d2phi_ds2 is rad per inch². Commands and target_thrust
-// are normalized, not volts.
+// One tick of read(). History index 0 is the current tick, and index i is
+// kHistoryLag[i] ticks old. v_* are body frame: surge and sway in m/s
+// (forward, left), yaw in rad/s. a_* are the normalized surge and yaw
+// commands in [-1, 1] that led into that tick. look_* are meters, body
+// frame, at kLookaheadM. path_phi is the travel tangent at the first
+// station. body_heading is the chassis nose, not the velocity direction.
 struct FollowInput {
-    double prev_surge = 0;
-    double prev_sway = 0;
-    double prev_yaw = 0;
+    double v_surge[kHistory] {};
+    double v_sway[kHistory] {};
+    double v_yaw[kHistory] {};
+    double a_surge[kHistory] {};
+    double a_yaw[kHistory] {};
     double path_phi = 0;
-    double vel_heading = 0;
-    double dphi_ds = 0;
-    double d2phi_ds2 = 0;
+    double body_heading = 0;
+    double look_x_m[kLookahead] {};
+    double look_y_m[kLookahead] {};
     double target_thrust = 1;
     double cross_track_in = 0;
 };
@@ -87,14 +106,19 @@ bool ready();
 // count must equal the actor's weight count. False leaves the old table.
 bool assignWeights(const float* weights, int count);
 
+// Drop the pose-override history. The next command() starts from rest.
+void reset();
+
 Reading read(const FollowInput& in);
 
-// Zero command until a weight table is assigned.
+// Zero command until a weight table is assigned. Does not touch the
+// pose-override history.
 CommandVector command(const FollowInput& in);
 
-// The pose override still calls this. It has no path, so the curvature
-// features are zero and the thrust target is full throttle. That is not
-// the observation the path policy is trained on.
+// Pose override. Records this tick in the history, samples the Hermite
+// fit of `target` at kLookaheadM, and commands surge and yaw. Thrust
+// stays at full scale: this target has no clock schedule. Lateral speed
+// is zero; StateEstimate does not carry it.
 CommandVector command(const StateEstimate& state, const DriftCurveTarget& target);
 
 }

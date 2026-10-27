@@ -6,7 +6,7 @@
  * each control tick and returns true when the block is finished. end() runs
  * once, with interrupted set when a deadline or a cancel cut it short.
  *
- * A command describes an outcome. Drive commands ask DriftFollower for
+ * A command describes an outcome. Drive commands ask a follower for
  * chassis volts. Mechanism commands only change a subsystem state. None of
  * them write motor voltage themselves.
  * ------------------------------------------------------------------------- */
@@ -49,6 +49,22 @@ public:
         (void)v_lin;
         (void)v_ang;
         return 0;
+    }
+
+    // Append this command's polyline onto out, starting at `from`.
+    // `from` becomes the end of whatever was appended, so the next leg
+    // plans from the pose this one finished on. count is the filled length.
+    // The default is one samplePath. A group that holds several motions
+    // walks each child, so the selector can draw a route before it runs.
+    virtual int appendRoute(Pose2d& from, Pose2d* out, int count, int cap) const {
+        if (out == nullptr || cap < 2 || count >= cap) return count;
+        Pose2d buf[64];
+        const int n = samplePath(from, buf, 64, 0.0, 0.0);
+        if (n < 2) return count;
+        const int begin = (count > 0) ? 1 : 0;
+        for (int i = begin; i < n && count < cap; ++i) out[count++] = buf[i];
+        if (count > 0) from = out[count - 1];
+        return count;
     }
 };
 

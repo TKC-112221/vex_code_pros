@@ -11,6 +11,8 @@
  *   - motor reversal is encoded by negating the port at construction
  * ------------------------------------------------------------------------- */
 #include "hardware/TankDrive.h"
+#include "hardware/DeviceRead.h"
+#include "hardware/DifferentialMix.h"
 #include "config/Ports.h"
 #include "config/Settings.h"
 #include "core/Specs.h"
@@ -22,14 +24,7 @@
 using mathutil::clamp_val;
 using mathutil::sign;
 
-static inline std::int32_t voltsToMv(double volts) {
-    double mv = clamp_val(volts * 1000.0, -12000.0, 12000.0);
-    return static_cast<std::int32_t>(mv);
-}
-static inline std::int32_t pctToMv(int pct) {
-    int p = (pct > 100) ? 100 : (pct < -100 ? -100 : pct);
-    return static_cast<std::int32_t>(p * 120);   // 100% -> 12000 mV
-}
+static constexpr int kBankMotors = 3;
 
 TankDrive::TankDrive(const IFeedForward& feedforward, double max_volts, bool scale_battery)
     : feedforward_(&feedforward), max_voltage(max_volts), use_battery_scaling(scale_battery) {
@@ -44,9 +39,10 @@ TankDrive::TankDrive(const IFeedForward& feedforward, double max_volts, bool sca
         { (std::int8_t)Ports::R1, (std::int8_t)Ports::R2, (std::int8_t)Ports::R3 },
         pros::MotorGears::blue);
 
-    intake        = new pros::Motor(Ports::INTAKE, pros::MotorGears::green);
-    roller_top    = new pros::Motor(Ports::ROLLER_TOP, pros::MotorGears::green);
-    roller_bottom = new pros::Motor(Ports::ROLLER_BOTTOM, pros::MotorGears::green);
+    main1 = new pros::Motor(Ports::MAIN1, pros::MotorGears::blue);
+    main2 = new pros::Motor(Ports::MAIN2, pros::MotorGears::blue);
+    sub1  = new pros::Motor(Ports::SUB1, pros::MotorGears::green);
+    sub2  = new pros::Motor(Ports::SUB2, pros::MotorGears::green);
 
     pneumatics_g = new pros::adi::DigitalOut(Ports::PNEUMATICS_G);
     pneumatics_b = new pros::adi::DigitalOut(Ports::PNEUMATICS_B);
@@ -54,13 +50,19 @@ TankDrive::TankDrive(const IFeedForward& feedforward, double max_volts, bool sca
 
 TankDrive::~TankDrive() {
     delete left_drive; delete right_drive; delete imu; delete pilot;
-    delete intake; delete roller_top; delete roller_bottom;
+    delete main1; delete main2; delete sub1; delete sub2;
     delete pneumatics_g; delete pneumatics_b;
 }
 
 void TankDrive::initialize() {
     left_drive->set_brake_mode(pros::MotorBrake::coast);
     right_drive->set_brake_mode(pros::MotorBrake::coast);
+    // Hold keeps the cascade up when both motors are idle. Voltage still wins
+    // while a command is applied. SUB1/SUB2 stay free.
+    main1->set_brake_mode(pros::MotorBrake::hold);
+    main2->set_brake_mode(pros::MotorBrake::hold);
+    sub1->set_brake_mode(pros::MotorBrake::coast);
+    sub2->set_brake_mode(pros::MotorBrake::coast);
 }
 
 void TankDrive::beginSensorCalibration() {
@@ -68,11 +70,14 @@ void TankDrive::beginSensorCalibration() {
 }
 
 void TankDrive::waitSensorCalibration() {
-    if (Settings::ControlToggles::IMU_FALLBACK) return;
-    // Blocking reset. The kernel gives up after 3 s, and it never polls
-    // is_calibrating(), which stays true on an error status and froze
-    // initialize() the moment the startup clip returned.
-    imu->reset(true);
+    if (Settings::ControlToggles::IMU_FALLBACK) {
+        imu_wheels_ = true;
+        return;
+    }
+    // Blocking reset, with one retry. A failed reset latches wheel heading
+    // so later reads do not integrate PROS_ERR_F as a heading.
+    imu_wheels_ = !devread::imuCalibrated(*imu);
+    if (imu_wheels_) have_heading_ = false;
 }
 
 void TankDrive::calibrateSensors() {
@@ -87,33 +92,35 @@ void TankDrive::stop() {
 
 JoystickData TankDrive::readJoystick() {
     JoystickData joy;
-    joy.left_y  =  pilot->get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y)  / Controller::FULL_SCALE;
-    joy.left_x  =  pilot->get_analog(pros::E_CONTROLLER_ANALOG_LEFT_X)  / Controller::FULL_SCALE;
-    joy.right_y =  pilot->get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_Y) / Controller::FULL_SCALE;
-    joy.right_x =  pilot->get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_X) / Controller::FULL_SCALE;
+    joy.left_y  = devread::stick(*pilot, pros::E_CONTROLLER_ANALOG_LEFT_Y);
+    joy.left_x  = devread::stick(*pilot, pros::E_CONTROLLER_ANALOG_LEFT_X);
+    joy.right_y = devread::stick(*pilot, pros::E_CONTROLLER_ANALOG_RIGHT_Y);
+    joy.right_x = devread::stick(*pilot, pros::E_CONTROLLER_ANALOG_RIGHT_X);
     return joy;
 }
 
 ButtonState TankDrive::readButtons() {
     ButtonState b;
-    b.l1 = pilot->get_digital(pros::E_CONTROLLER_DIGITAL_L1);
-    b.l2 = pilot->get_digital(pros::E_CONTROLLER_DIGITAL_L2);
-    b.r1 = pilot->get_digital(pros::E_CONTROLLER_DIGITAL_R1);
-    b.r2 = pilot->get_digital(pros::E_CONTROLLER_DIGITAL_R2);
-    b.up = pilot->get_digital(pros::E_CONTROLLER_DIGITAL_UP);
-    b.down = pilot->get_digital(pros::E_CONTROLLER_DIGITAL_DOWN);
-    b.left = pilot->get_digital(pros::E_CONTROLLER_DIGITAL_LEFT);
-    b.right = pilot->get_digital(pros::E_CONTROLLER_DIGITAL_RIGHT);
-    b.a = pilot->get_digital(pros::E_CONTROLLER_DIGITAL_A);
-    b.b = pilot->get_digital(pros::E_CONTROLLER_DIGITAL_B);
-    b.x = pilot->get_digital(pros::E_CONTROLLER_DIGITAL_X);
-    b.y = pilot->get_digital(pros::E_CONTROLLER_DIGITAL_Y);
+    b.l1 = devread::button(*pilot, pros::E_CONTROLLER_DIGITAL_L1);
+    b.l2 = devread::button(*pilot, pros::E_CONTROLLER_DIGITAL_L2);
+    b.r1 = devread::button(*pilot, pros::E_CONTROLLER_DIGITAL_R1);
+    b.r2 = devread::button(*pilot, pros::E_CONTROLLER_DIGITAL_R2);
+    b.up = devread::button(*pilot, pros::E_CONTROLLER_DIGITAL_UP);
+    b.down = devread::button(*pilot, pros::E_CONTROLLER_DIGITAL_DOWN);
+    b.left = devread::button(*pilot, pros::E_CONTROLLER_DIGITAL_LEFT);
+    b.right = devread::button(*pilot, pros::E_CONTROLLER_DIGITAL_RIGHT);
+    b.a = devread::button(*pilot, pros::E_CONTROLLER_DIGITAL_A);
+    b.b = devread::button(*pilot, pros::E_CONTROLLER_DIGITAL_B);
+    b.x = devread::button(*pilot, pros::E_CONTROLLER_DIGITAL_X);
+    b.y = devread::button(*pilot, pros::E_CONTROLLER_DIGITAL_Y);
     return b;
 }
 
 void TankDrive::alignHeadingTo(double target_rad) {
-    if (Settings::ControlToggles::IMU_FALLBACK) { imu_offset_ = 0.0; return; }
-    double raw = -imu->get_rotation() * (M_PI / 180.0);
+    if (Settings::ControlToggles::IMU_FALLBACK || imu_wheels_) { imu_offset_ = 0.0; return; }
+    const double rot = imu->get_rotation();
+    if (!devread::finite(rot)) return;
+    const double raw = -rot * (M_PI / 180.0);
     imu_offset_ = target_rad - raw;
 }
 
@@ -121,50 +128,58 @@ ChassisObservation TankDrive::readObservation(double prev_heading_rad) {
     namespace CT = Settings::ControlToggles;
     ChassisObservation o;
 
-    // Forward kinematics: wheel travel -> forward increment (deg -> turns -> m).
-    double cl = (left_drive->get_position()  / 360.0) * Robot::METERS_PER_TURN;
-    double cr = (right_drive->get_position() / 360.0) * Robot::METERS_PER_TURN;
-    double delta_l = cl - prev_l_;
-    double delta_r = cr - prev_r_;
-    prev_l_ = cl; prev_r_ = cr;
+    bool gap = false;
+    const double dt = devread::sampleDt(last_sense_ms_, have_sense_ms_, gap);
+    o.sample_dt = dt;
+    if (gap) { have_l_ = false; have_r_ = false; }
+
+    // Both banks, every motor. A failed read holds that bank's baseline.
+    double ldeg = 0.0, rdeg = 0.0;
+    const bool lok = devread::groupDegrees(*left_drive, kBankMotors, ldeg);
+    const bool rok = devread::groupDegrees(*right_drive, kBankMotors, rdeg);
+    const double delta_l = lok ? devread::travelMeters(ldeg, prev_l_, have_l_) : 0.0;
+    const double delta_r = rok ? devread::travelMeters(rdeg, prev_r_, have_r_) : 0.0;
     o.forward_delta = (delta_l + delta_r) / 2.0;
+    o.left_pos_deg = lok ? ldeg : (have_l_ ? prev_l_ / Robot::METERS_PER_TURN * 360.0 : 0.0);
+    o.right_pos_deg = rok ? rdeg : (have_r_ ? prev_r_ / Robot::METERS_PER_TURN * 360.0 : 0.0);
 
-    //double l_vel = left_drive->get_actual_velocity();
-    //double r_vel = right_drive->get_actual_velocity();
-    //o.v_lin = (l_vel + r_vel) / 2.0 * Robot::RPM_TO_MPS;
-    double l_vel = delta_l / System::DT_SEC;
-    double r_vel = delta_r / System::DT_SEC;
-    o.v_lin = o.forward_delta / System::DT_SEC * Robot::RPM_TO_MPS;
+    const double v_l = (dt > 0.0) ? delta_l / dt : 0.0;
+    const double v_r = (dt > 0.0) ? delta_r / dt : 0.0;
+    o.v_lin = (dt > 0.0) ? o.forward_delta / dt : 0.0;
+    o.left_vel_rpm = v_l / Robot::RPM_TO_MPS;
+    o.right_vel_rpm = v_r / Robot::RPM_TO_MPS;
 
-
-    if (CT::IMU_FALLBACK) {
+    if (CT::IMU_FALLBACK || imu_wheels_) {
         o.heading_rad = prev_heading_rad + (delta_r - delta_l) / Robot::Chassis::TRACK_WIDTH_M;
-        o.v_ang = (r_vel - l_vel) * Robot::RPM_TO_MPS / Robot::Chassis::TRACK_WIDTH_M;
-        o.imu_rate_z_dps  = -(r_vel - l_vel) * Robot::RPM_TO_MPS / Robot::Chassis::TRACK_WIDTH_M * (180.0 / M_PI);
+        o.v_ang = (v_r - v_l) / Robot::Chassis::TRACK_WIDTH_M;
+        o.imu_rate_z_dps = -o.v_ang * (180.0 / M_PI);
         o.imu_accel_x = 0.0; o.imu_accel_y = 0.0;
+        held_heading_ = o.heading_rad;
+        have_heading_ = true;
     } else {
-        o.heading_rad = -imu->get_rotation() * (M_PI / 180.0) + imu_offset_;
-        o.v_ang = -imu->get_gyro_rate().z * (M_PI / 180.0);
-        o.imu_rate_z_dps  = imu->get_gyro_rate().z;
-        o.imu_accel_x = imu->get_accel().x;
-        o.imu_accel_y = imu->get_accel().y;
+        const double rot = imu->get_rotation();
+        if (devread::finite(rot)) {
+            o.heading_rad = -rot * (M_PI / 180.0) + imu_offset_;
+            held_heading_ = o.heading_rad;
+            have_heading_ = true;
+        } else {
+            o.heading_rad = have_heading_ ? held_heading_ : prev_heading_rad;
+        }
+        const pros::imu_gyro_s_t rate = imu->get_gyro_rate();
+        if (devread::finite(rate.z)) {
+            o.v_ang = -rate.z * (M_PI / 180.0);
+            o.imu_rate_z_dps = rate.z;
+        }
+        const pros::imu_accel_s_t accel = imu->get_accel();
+        if (devread::finite(accel.x)) o.imu_accel_x = accel.x;
+        if (devread::finite(accel.y)) o.imu_accel_y = accel.y;
     }
 
-    o.left_pos_deg = left_drive->get_position();
-    o.right_pos_deg = right_drive->get_position();
-    o.left_vel_rpm = l_vel;  o.right_vel_rpm = r_vel;
-    o.left_current_amps  = left_drive->get_current_draw()  / 1000.0;
-    o.right_current_amps = right_drive->get_current_draw() / 1000.0;
-    {
-        const auto l_temps = left_drive->get_temperature_all();
-        const auto r_temps = right_drive->get_temperature_all();
-        double l_sum = 0.0, r_sum = 0.0;
-        for (double t : l_temps) l_sum += t;
-        for (double t : r_temps) r_sum += t;
-        o.left_temp_c  = l_temps.empty() ? 0.0 : l_sum / static_cast<double>(l_temps.size());
-        o.right_temp_c = r_temps.empty() ? 0.0 : r_sum / static_cast<double>(r_temps.size());
-    }
-    o.battery_voltage = pros::battery::get_voltage() / 1000.0;
+    o.left_current_amps = devread::groupAmps(*left_drive, kBankMotors);
+    o.right_current_amps = devread::groupAmps(*right_drive, kBankMotors);
+    o.left_temp_c = devread::groupTempC(*left_drive, kBankMotors);
+    o.right_temp_c = devread::groupTempC(*right_drive, kBankMotors);
+    o.battery_voltage = devread::batteryVolts();
     return o;
 }
 
@@ -193,8 +208,8 @@ ChassisCommand TankDrive::applyDrive(const ChassisCommand& cmd, const ChassisObs
 
     // Stick-zero brake: gently oppose residual motion when the sticks are idle.
     if (CT::STICK_ZERO_BRAKE) {
-        double fwd  = pilot->get_analog(pros::E_CONTROLLER_ANALOG_LEFT_Y)  / Controller::FULL_SCALE;
-        double turn = -pilot->get_analog(pros::E_CONTROLLER_ANALOG_RIGHT_X) / Controller::FULL_SCALE;
+        double fwd  = devread::stick(*pilot, pros::E_CONTROLLER_ANALOG_LEFT_Y);
+        double turn = -devread::stick(*pilot, pros::E_CONTROLLER_ANALOG_RIGHT_X);
         if (std::fabs(fwd) < Controls::STICK_ZERO_DEADBAND &&
             std::fabs(turn) < Controls::STICK_ZERO_DEADBAND) {
             double left_mps  = obs.left_vel_rpm  * Robot::RPM_TO_MPS;
@@ -216,12 +231,12 @@ ChassisCommand TankDrive::applyDrive(const ChassisCommand& cmd, const ChassisObs
 
     double batt_scale = 1.0;
     if (use_battery_scaling) {
-        double batt = pros::battery::get_voltage() / 1000.0;
+        double batt = devread::batteryVolts();
         batt_scale = (batt > Controls::BATTERY_VALID_V) ? (System::MAX_VOLTS / batt) : 1.0;
     }
 
-    left_drive->move_voltage(voltsToMv(left_v * batt_scale));
-    right_drive->move_voltage(voltsToMv(right_v * batt_scale));
+    left_drive->move_voltage(devread::voltsToMv(left_v * batt_scale));
+    right_drive->move_voltage(devread::voltsToMv(right_v * batt_scale));
 
     // Report the applied effort (post-safety, pre battery scaling) as chassis.
     ChassisCommand applied;
@@ -230,10 +245,16 @@ ChassisCommand TankDrive::applyDrive(const ChassisCommand& cmd, const ChassisObs
     return applied;
 }
 
+CascadeReading TankDrive::readCascade() const {
+    return readMainPair(*main1, *main2);
+}
+
 void TankDrive::applySubsystems(const SubsystemCommand& sub) {
-    intake->move_voltage(pctToMv(sub.intake_pct));
-    roller_top->move_voltage(pctToMv(sub.roller_top_pct));
-    roller_bottom->move_voltage(pctToMv(sub.roller_bottom_pct));
+    const MainPairPct pair = mixMainPair(sub.cascade_pct, sub.intake_pct);
+    main1->move_voltage(devread::pctToMv(pair.main1_pct));
+    main2->move_voltage(devread::pctToMv(pair.main2_pct));
+    sub1->move_voltage(0);
+    sub2->move_voltage(0);
     pneumatics_g->set_value(sub.pneumatics_g_state);
     pneumatics_b->set_value(sub.pneumatics_b_state);
 }

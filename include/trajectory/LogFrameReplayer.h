@@ -9,10 +9,17 @@
 #include "interfaces/ITrajectoryManager.h"
 #include "core/LogFrame.h"
 #include "core/Specs.h"
-#include <array>
 
 class LogFrameReplayer : public ITrajectoryManager {
 public:
+    // The frame store is allocated here. A failed full-size allocation falls
+    // back to a shorter buffer, and a second failure leaves recording off.
+    // The PROS image is built without exceptions, so this must not throw.
+    LogFrameReplayer();
+    ~LogFrameReplayer();
+    LogFrameReplayer(const LogFrameReplayer&) = delete;
+    LogFrameReplayer& operator=(const LogFrameReplayer&) = delete;
+
     void loadFromHeader() override;
     void saveToConsole() override;
 
@@ -33,7 +40,8 @@ public:
     bool isFinished() const override { return finished_; }
 
 private:
-    std::array<LogFrame, System::MAX_RECORD_FRAMES> buffer_{};
+    LogFrame* buffer_ = nullptr;
+    int capacity_ = 0;
     int length_ = 0;
 
     // Replay cursor + baselines

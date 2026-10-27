@@ -9,8 +9,9 @@
  *
  * The call blocks until the clip ends. On the V5 the frames go to the brain
  * LCD. On the host they go to the brain screen in the main window. A brain
- * touch, a click on that screen, or Escape skips the rest. Nothing is drawn
- * when no frame file can be opened, so a robot with an empty card still boots.
+ * touch, a click on that screen, Escape, or L1+L2+R1+R2 skips the rest.
+ * Nothing is drawn when no frame file can be opened, so a robot with an
+ * empty card still boots.
  * ------------------------------------------------------------------------- */
 
 struct FrameSequence {

@@ -12,35 +12,46 @@
 #include <cstdio>
 #include <cmath>
 #include <algorithm>
+#include <new>
 
 using mathutil::normalize_angle;
 
+namespace {
+constexpr int kFallbackFrames = 4000;
+}
+
+LogFrameReplayer::LogFrameReplayer() {
+    capacity_ = System::MAX_RECORD_FRAMES;
+    buffer_ = new (std::nothrow) LogFrame[static_cast<std::size_t>(capacity_)];
+    if (buffer_ == nullptr) {
+        capacity_ = kFallbackFrames;
+        buffer_ = new (std::nothrow) LogFrame[static_cast<std::size_t>(capacity_)];
+    }
+    if (buffer_ == nullptr) capacity_ = 0;
+}
+
+LogFrameReplayer::~LogFrameReplayer() {
+    delete[] buffer_;
+    buffer_ = nullptr;
+    capacity_ = 0;
+}
+
 // Decode a recorded subsystem bitmask into motor/pneumatics commands.
 static SubsystemCommand decodeRecordedBitmask(uint8_t bitmask) {
-    bool r1 = bitmask & (1 << 0), r2 = bitmask & (1 << 1);
-    bool l1 = bitmask & (1 << 2), l2 = bitmask & (1 << 3);
-    bool pg = bitmask & (1 << 4), pb = bitmask & (1 << 5);
-    int intake = 0, top = 0, bottom = 0, intake_m = 2, score_m = 2;
-    if (r1) { intake += 100;  top += -2;  bottom += 1;    intake_m -= 1; }
-    if (r2) { intake += -100; top += -2;  bottom += 1;    intake_m -= 1; }
-    if (l1) {                 top += 106; bottom += 97;   score_m -= 1;  }
-    if (l2) {                 top += -24; bottom += -103; score_m -= 1;  }
-    SubsystemCommand sub;
-    sub.intake_pct        = intake * intake_m;
-    sub.roller_top_pct    = top * score_m;
-    sub.roller_bottom_pct = bottom * score_m;
-    sub.pneumatics_g_state = pg;
-    sub.pneumatics_b_state = pb;
-    sub.raw_bitmask = bitmask;
-    return sub;
+    const bool r1 = bitmask & (1 << 0), r2 = bitmask & (1 << 1);
+    const bool l1 = bitmask & (1 << 2), l2 = bitmask & (1 << 3);
+    const bool pg = bitmask & (1 << 4), pb = bitmask & (1 << 5);
+    return mixShoulderButtons(r1, r2, l1, l2, pg, pb, bitmask);
 }
 
 void LogFrameReplayer::loadFromHeader() {
     length_ = 0;
+    if (buffer_ == nullptr || capacity_ <= 0) return;
     const char* filepath = Settings::SKILLS_MODE ? "/usd/skills_auto.bin" : "/usd/prematch.bin";
     FILE* file = openRobotFile(filepath, "rb");
     if (file) {
-        length_ = fread(buffer_.data(), sizeof(LogFrame), System::MAX_RECORD_FRAMES, file);
+        length_ = static_cast<int>(fread(buffer_, sizeof(LogFrame),
+                                          static_cast<std::size_t>(capacity_), file));
         fclose(file);
     } else {
         printf("Error: Could not open %s from microSD card.\n", filepath);
@@ -57,7 +68,7 @@ void LogFrameReplayer::recordFrame(const Pose2d& pose,
                                    const SubsystemCommand& sub,
                                    const ChassisObservation& obs,
                                    const SensorDict& raw) {
-    if (length_ >= System::MAX_RECORD_FRAMES) return;
+    if (buffer_ == nullptr || length_ >= capacity_) return;
     LogFrame& f = buffer_[length_];
     f.time = pros::millis() / 1000.0;
 
@@ -112,11 +123,15 @@ void LogFrameReplayer::recordFrame(const Pose2d& pose,
 }
 
 void LogFrameReplayer::saveToConsole() {
+    if (buffer_ == nullptr || capacity_ <= 0) {
+        printf("Error: recording buffer was not allocated.\n");
+        return;
+    }
     const char* filepath = Settings::SKILLS_MODE ? "/usd/skills_auto.bin" : "/usd/prematch.bin";
 
     FILE* file = openRobotFile(filepath, "wb");
     if (file) {
-        fwrite(buffer_.data(), sizeof(LogFrame), length_, file);
+        fwrite(buffer_, sizeof(LogFrame), static_cast<std::size_t>(length_), file);
         fclose(file);
         printf("Successfully saved %d frames to %s\n", length_, filepath);
     } else {
@@ -125,19 +140,19 @@ void LogFrameReplayer::saveToConsole() {
 }
 
 Pose2d LogFrameReplayer::getStartPose() const {
-    if (length_ == 0) return Pose2d{};
+    if (length_ == 0 || buffer_ == nullptr) return Pose2d{};
     return Pose2d{buffer_[0].x, buffer_[0].y, buffer_[0].theta};
 }
 
 double LogFrameReplayer::getStartHeading() const {
-    return (length_ == 0) ? 0.0 : buffer_[0].theta;
+    return (length_ == 0 || buffer_ == nullptr) ? 0.0 : buffer_[0].theta;
 }
 
 void LogFrameReplayer::resetPlayback() {
     replay_index_ = 0.0f;
     finished_ = false;
-    ref_l_0_ = (length_ > 0) ? buffer_[0].l_pos_deg : 0.0;
-    ref_r_0_ = (length_ > 0) ? buffer_[0].r_pos_deg : 0.0;
+    ref_l_0_ = (length_ > 0 && buffer_ != nullptr) ? buffer_[0].l_pos_deg : 0.0;
+    ref_r_0_ = (length_ > 0 && buffer_ != nullptr) ? buffer_[0].r_pos_deg : 0.0;
     has_valid_wheel_ref_ = (length_ > 1) &&
         (std::fabs(buffer_[length_ - 1].l_pos_deg - ref_l_0_) > 1e-6 ||
          std::fabs(buffer_[length_ - 1].r_pos_deg - ref_r_0_) > 1e-6);

@@ -22,6 +22,7 @@
 #include "interfaces/IDriveBase.h"
 #include "hardware/DistanceBank.h"
 #include "api.h"
+#include <cstdint>
 
 class XDrive : public IDriveBase {
 public:
@@ -40,6 +41,7 @@ public:
     void readDistances(DistanceReading (&out)[kDistanceChannels]) override;
     ChassisCommand applyDrive(const ChassisCommand& cmd, const ChassisObservation& obs) override;
     void applySubsystems(const SubsystemCommand& sub) override;
+    CascadeReading readCascade() const override;
     void stop() override;
     void alignHeadingTo(double target_rad) override;
 
@@ -50,20 +52,29 @@ protected:
     // Shared peripherals
     pros::Imu*        imu_;
     pros::Controller* pilot_;
-    pros::Motor*      intake_;
-    pros::Motor*      roller_top_;
-    pros::Motor*      roller_bottom_;
+    pros::Motor*      main1_;
+    pros::Motor*      main2_;
+    pros::Motor*      sub1_;
+    pros::Motor*      sub2_;
     pros::adi::DigitalOut* pneumatics_g_;
     pros::adi::DigitalOut* pneumatics_b_;
 
     double max_voltage_;
     bool   use_battery_scaling_;
     double prev_fl_ = 0, prev_fr_ = 0, prev_bl_ = 0, prev_br_ = 0;
+    bool have_fl_ = false, have_fr_ = false, have_bl_ = false, have_br_ = false;
     double imu_offset_ = 0.0;
+    bool imu_wheels_ = false;
+    bool have_heading_ = false;
+    double held_heading_ = 0.0;
+    std::uint32_t last_sense_ms_ = 0;
+    bool have_sense_ms_ = false;
     DistanceBank ranges_;
 
     // Shared helpers reused by ParenthesisDrive.
     double batteryScale() const;                       // MAX_VOLTS/battery or 1
     static double clampScale(const double* v, int n, double max_v); // ratio-preserving
-    void fillImuChannels(double prev_heading_rad, ChassisObservation& o) const;
+    void fillImuChannels(double prev_heading_rad, ChassisObservation& o);
+    // Measured tick length. A gap rebases encoder baselines via `gap`.
+    double takeSampleDt(bool& gap);
 };

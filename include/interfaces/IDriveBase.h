@@ -20,9 +20,10 @@ public:
     virtual void initialize() = 0;
 
     // Clear calibration bookkeeping and return. waitSensorCalibration()
-    // performs the blocking IMU reset (about two seconds, 3 s kernel cap).
-    // The robot must stay still until that wait returns. Startup runs the
-    // wait on another task during the clip so this thread can keep going.
+    // performs the blocking IMU reset (about two seconds, 3 s kernel cap)
+    // and retries once. A failed reset latches wheel-derived heading inside
+    // the drive. The robot must stay still until that wait returns. Startup
+    // runs the wait on another task so the control tick can keep going.
     virtual void beginSensorCalibration() {}
     virtual void waitSensorCalibration() {}
 
@@ -48,6 +49,8 @@ public:
     // scaling) so it can be logged/recorded faithfully.
     virtual ChassisCommand applyDrive(const ChassisCommand& cmd, const ChassisObservation& obs) = 0;
     virtual void applySubsystems(const SubsystemCommand& sub) = 0;
+    // MAIN1/MAIN2 common mode. Drives without that pair return a zero reading.
+    virtual CascadeReading readCascade() const { return {}; }
     virtual void stop() = 0;
 
     // --- Heading alignment for autonomous start ---

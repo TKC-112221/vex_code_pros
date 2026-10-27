@@ -8,23 +8,9 @@ bool MacroController::isAbortRequested(const ButtonState& btn) const {
     return btn.l1 && btn.l2 && btn.r1 && btn.r2;
 }
 
-// Shared intake/roller mixing used by both live and recorded decoding.
 static SubsystemCommand mixSubsystems(bool r1, bool r2, bool l1, bool l2,
                                       bool g_state, bool b_state, uint8_t bitmask) {
-    int intake = 0, top = 0, bottom = 0, intake_m = 2, score_m = 2;
-    if (r1) { intake += 100;  top += -2;  bottom += 1;   intake_m -= 1; }
-    if (r2) { intake += -100; top += -2;  bottom += 1;   intake_m -= 1; }
-    if (l1) {                 top += 106; bottom += 97;  score_m -= 1;  }
-    if (l2) {                 top += -24; bottom += -103; score_m -= 1; }
-
-    SubsystemCommand sub;
-    sub.intake_pct       = intake * intake_m;
-    sub.roller_top_pct   = top * score_m;
-    sub.roller_bottom_pct= bottom * score_m;
-    sub.pneumatics_g_state = g_state;
-    sub.pneumatics_b_state = b_state;
-    sub.raw_bitmask = bitmask;
-    return sub;
+    return mixShoulderButtons(r1, r2, l1, l2, g_state, b_state, bitmask);
 }
 
 SubsystemCommand MacroController::processSubsystems(const ButtonState& btn, uint32_t now_ms) {
@@ -59,9 +45,9 @@ void MacroController::captureIntent(bool r1, bool r2, bool l1, bool l2) {
     else if (r2 && !r1) intent_.intake = IntakeState::Out;
     else intent_.intake = IntakeState::Idle;
 
-    if (l1 && !l2) intent_.shooter = ShooterState::Spin;
-    else if (l2 && !l1) intent_.shooter = ShooterState::Reverse;
-    else intent_.shooter = ShooterState::Idle;
+    if (l1 && !l2) intent_.cascade = CascadeState::Up;
+    else if (l2 && !l1) intent_.cascade = CascadeState::Down;
+    else intent_.cascade = CascadeState::Idle;
 
     intent_.pneumatic_g = g_state_;
     intent_.pneumatic_b = b_state_;

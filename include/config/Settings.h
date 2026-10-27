@@ -3,15 +3,25 @@
  * Settings.h  --  Feature flags and mode selection. Ported verbatim from v1
  * (config/toggles.h). These toggles gate optional control behaviors so the
  * pipeline's active path exactly matches v1's configured behavior.
+ *
+ * USE_TUNING_PASTE selects initializer blocks in Tuning.h and
+ * MockDriveParams.h. 1 compiles the searched knobs from
+ * python/tuning_paste.txt. 0 keeps the hand-tuned values in those headers.
+ * -DUSE_TUNING_PASTE=1 on the compiler command line overrides the default.
  * ------------------------------------------------------------------------- */
+
+#ifndef USE_TUNING_PASTE
+#define USE_TUNING_PASTE 1
+#endif
 
 namespace Settings {
 
     constexpr bool SKILLS_MODE = true;
 
     // Competition autonomous(), and controller Y during driver control.
-    // True runs buildSkillsRoutine() through the command scheduler. False
-    // keeps the recorded-log replay selected by SKILLS_MODE.
+    // True runs the catalog routine chosen for this match (red, blue, or
+    // skills). The host field window sets that choice. False keeps the
+    // recorded-log replay selected by SKILLS_MODE.
     namespace Auton {
         constexpr bool USE_COMMAND_SCHEDULER = true;
     }
@@ -56,12 +66,16 @@ namespace Settings {
 
     // Startup clip on the brain. The control tick is already running; sticks
     // stay locked until the IMU is ready, which does not wait for this clip.
+    // On the V5 the clip runs on its own task so initialize() can return and
+    // the competition task can enter autonomous. On the host it stays on the
+    // thread that created the window.
     // A missing first file returns immediately, so an empty card still boots.
     // Export frames with: ffmpeg -i clip.mp4 -vf scale=480:272 splash/frame_%04d.png
     // Copy that folder to the microSD card. On the host, leave it in the
     // working directory (the "/usd/" prefix is stripped).
     // frame_step 1 plays every file; 2 plays every other file.
-    // Touch the brain, click its screen in the main window, or press Escape, to skip.
+    // Touch the brain, click its screen in the main window, press Escape,
+    // or hold L1+L2+R1+R2, to skip.
     namespace Splash {
         constexpr bool ENABLED = true;
         //constexpr const char* PATH_FORMAT = "/usd/VEX/SystemStartAnimation/GANDUM_SystemInitiation/frame_%03d.png";

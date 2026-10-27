@@ -4,10 +4,27 @@
  *
  *   DriveTo(poseInches(24, 48, 0, 1.0))
  *       .afterTravel(inches(12), robotMechanisms().intake.in())
- *       .then(robotMechanisms().shooter.idle())
+ *       .then(robotMechanisms().cascade.idle())
  *
- * The leg is a DriveToPose. afterTravel() is a subcommand: the move keeps
- * going, and the action starts once this leg has covered that much odometry.
+ * The leg is a DriveToPose. segmentPath() uses straight segments instead,
+ * and keep-outs on the constraints are circles the polyline stays outside.
+ * turnOnGoal() still plans the swing as an orbit about the goal the front
+ * is on, even when segmentPath() is also set: the heading in the pose is
+ * where the nose finishes, and the command presses into the point while
+ * it yaws.
+ *
+ *   DriveTo(poseInches(24, 48, 90), turnOnGoal())
+ *
+ * headingInput() feeds the follower travel tangents at regular stations
+ * instead of curvature and its arc-length derivatives. The default keeps
+ * the curvature input.
+ *
+ *   DriveTo(poseInches(24, 48, 0, 1.0), headingInput())
+ *
+ *   DriveTo(poseInches(24, 48, 0), segmentPath())
+ *
+ * afterTravel() is a subcommand: the move keeps going, and the action starts
+ * once this leg has covered that much odometry.
  * The move is the deadline, so a still-running action is cancelled when the
  * pose is reached and cannot hold the chassis. then() is also a subcommand,
  * and it runs after the move finishes, before the routine starts the next
@@ -15,6 +32,7 @@
  * ------------------------------------------------------------------------- */
 
 #include "auton/CommandGroups.h"
+#include "auton/DriveSegments.h"
 #include "auton/DriveToPose.h"
 #include <memory>
 #include <utility>
@@ -86,8 +104,12 @@ private:
     // and then() commands run after that group finishes.
     void compose() {
         if (composed_) return;
-        std::unique_ptr<Command> motion =
-            std::make_unique<DriveToPose>(target_, path_, model_);
+        // An orbit is not a polyline. turn_on_goal keeps the curve follower.
+        std::unique_ptr<Command> motion;
+        if (path_.line_segments && !path_.turn_on_goal)
+            motion = std::make_unique<DriveSegments>(target_, path_, model_);
+        else
+            motion = std::make_unique<DriveToPose>(target_, path_, model_);
         if (!during_.empty()) {
             motion = std::make_unique<ParallelDeadlineGroup>(
                 std::move(motion), std::move(during_));

@@ -6,24 +6,38 @@
  * not open the field window. read_policy() is DrivePolicy::read, so the
  * observation vector matches the firmware actor.
  * ------------------------------------------------------------------------- */
+#include "config/Settings.h"
 #include "control/DriftFollower.h"
 #include "control/DrivePolicy.h"
 #include "control/VASController.h"
 #include "core/LogFrame.h"
 #include "core/Specs.h"
 #include "core/Tuning.h"
+#include "estimators/ImuLinearDelta.h"
+#include "estimators/OdometryEstimator.h"
 #include "hardware/MockDrive.h"
 #include "hardware/MockDriveParams.h"
+#include "logic/GoalAligner.h"
 #include "math/NeuralNetwork.h"
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <cstdint>
 #include <cstdio>
 #include <string>
 #include <vector>
 
 namespace py = pybind11;
+
+// What OdometryEstimator publishes. Inches and radians, same frame as the plant.
+struct LocEstimate {
+    double x_in = 0;
+    double y_in = 0;
+    double theta = 0;
+    double v_lin = 0;
+    double v_ang = 0;
+};
 
 namespace {
 
@@ -42,7 +56,33 @@ public:
 
     void reset(double x_in, double y_in, double theta,
                double v_lin, double v_lat, double v_ang) {
+        localizing_ = false;
         drive_.setPlant(x_in, y_in, theta, v_lin, v_lat, v_ang);
+    }
+
+    // Place the plant, then start the same localizer the firmware runs:
+    // noisy IMU and encoders, accelerometer travel, wheel-odometry fusion,
+    // and the wall nudge. `seed` redraws that IMU so a rollout is repeatable.
+    // The estimate begins on the true pose, which is the auton start override.
+    void localizeReset(double x_in, double y_in, double theta,
+                       double v_lin, double v_lat, double v_ang,
+                       std::uint64_t seed) {
+        reset(x_in, y_in, theta, v_lin, v_lat, v_ang);
+        drive_.armLocalization(seed);
+        imu_delta_.reset();
+        estimator_.reset();
+        estimator_.overridePose(Pose2d{x_in, y_in, theta});
+        prev_heading_ = theta;
+        localizing_ = true;
+    }
+
+    LocEstimate estimate() const {
+        if (!localizing_) {
+            const MockDrive::PlantSnapshot plant = drive_.plantSnapshot();
+            return LocEstimate{plant.x_in, plant.y_in, plant.theta, plant.v_lin, plant.v_ang};
+        }
+        const StateEstimate state = estimator_.getState();
+        return LocEstimate{state.pose.x, state.pose.y, state.pose.theta, state.v_lin, state.v_ang};
     }
 
     // Chassis volts on the universal command axes. sway is stored and
@@ -54,6 +94,7 @@ public:
         cmd.angular = yaw;
         drive_.applyDrive(cmd, ChassisObservation{});
         drive_.stepSimulation(System::DT_SEC);
+        if (localizing_) ingestSensors();
         return drive_.plantSnapshot();
     }
 
@@ -63,9 +104,29 @@ public:
         drive_.setDynamics(velocity_tau, skid_tau, resistance, speed_scale);
     }
 
+    MockDrive::Dynamics dynamics() const { return drive_.dynamics(); }
+
+    // The bumper grab. Off for a scoring rollout, so touching a goal does
+    // not replace the path command. The firmware never calls this.
+    void setGoalAlign(bool enabled) { goalAlignSetEnabled(enabled); }
+
 private:
+    void ingestSensors() {
+        ChassisObservation obs = drive_.readObservation(prev_heading_);
+        imu_delta_.apply(obs, System::DT_SEC, !Settings::ControlToggles::IMU_FALLBACK);
+        SensorDict sensors;
+        sensors.chassis = obs;
+        drive_.readDistances(sensors.distance);
+        estimator_.update(sensors);
+        prev_heading_ = estimator_.getState().pose.theta;
+    }
+
     VASController feedforward_;
     MockDrive drive_;
+    OdometryEstimator estimator_;
+    ImuLinearDelta imu_delta_;
+    double prev_heading_ = 0.0;
+    bool localizing_ = false;
 };
 
 StateEstimate estimateFrom(double x_in, double y_in, double theta, double v_lin, double v_ang) {
@@ -112,8 +173,12 @@ public:
     DriftGuide& operator=(const DriftGuide&) = delete;
 
     void begin(double target_x, double target_y, double exit_direction, double exit_speed,
-               bool backwards, bool ignore_direction, const std::string& shape) {
-        follower_.config.shape = shapeFrom(shape);
+               bool backwards, bool ignore_direction, const std::string& shape,
+               bool timed_elastic) {
+        // "TimedElastic" is the local planner on a Hermite base, not a shape.
+        const bool legacy = shape == "TimedElastic";
+        follower_.config.shape = shapeFrom(legacy ? std::string("Hermite") : shape);
+        follower_.config.timed_elastic = timed_elastic || legacy;
         follower_.reset();
         follower_.config.forwards = !backwards;
         follower_.target = targetFrom(target_x, target_y, exit_direction, exit_speed,
@@ -166,7 +231,29 @@ public:
         return {cmd.linear, cmd.lateral, cmd.angular};
     }
 
+    // Polyline the follower is tracking, in inches. Before command() this
+    // previews and does not commit. With the band on, it is the one
+    // deformation of the base curve.
+    py::list path(double x_in, double y_in, double theta, double v_lin, double v_ang) const {
+        return polyline(&DriftFollower::samplePath, x_in, y_in, theta, v_lin, v_ang);
+    }
+
+    // The curve planned once, in inches. The timed elastic band is not on it.
+    py::list base_path(double x_in, double y_in, double theta, double v_lin, double v_ang) const {
+        return polyline(&DriftFollower::sampleBase, x_in, y_in, theta, v_lin, v_ang);
+    }
+
 private:
+    py::list polyline(int (DriftFollower::*sample)(const Pose2d&, Pose2d*, int, double, double) const,
+                      double x_in, double y_in, double theta, double v_lin, double v_ang) const {
+        Pose2d from{x_in, y_in, theta};
+        Pose2d samples[64];
+        const int n = (follower_.*sample)(from, samples, 64, v_lin, v_ang);
+        py::list out;
+        for (int i = 0; i < n; ++i) out.append(py::make_tuple(samples[i].x, samples[i].y));
+        return out;
+    }
+
     VASController feedforward_;
     DriftFollower follower_;
     double max_accel_ = Practice::MAX_ACCEL_MPS2;
@@ -203,6 +290,13 @@ std::vector<py::dict> readLog(const std::string& path) {
 PYBIND11_MODULE(plant, m) {
     m.doc() = "MockDrive plant and the drive-policy feature packing";
 
+    py::class_<LocEstimate>(m, "LocEstimate")
+        .def_readonly("x_in", &LocEstimate::x_in)
+        .def_readonly("y_in", &LocEstimate::y_in)
+        .def_readonly("theta", &LocEstimate::theta)
+        .def_readonly("v_lin", &LocEstimate::v_lin)
+        .def_readonly("v_ang", &LocEstimate::v_ang);
+
     py::class_<MockDrive::PlantSnapshot>(m, "PlantSnapshot")
         .def_readonly("x_in", &MockDrive::PlantSnapshot::x_in)
         .def_readonly("y_in", &MockDrive::PlantSnapshot::y_in)
@@ -217,10 +311,17 @@ PYBIND11_MODULE(plant, m) {
         .def(py::init<>())
         .def("begin", &DriftGuide::begin,
              py::arg("target_x"), py::arg("target_y"), py::arg("exit_direction"),
-             py::arg("exit_speed"), py::arg("backwards") = false, py::arg("ignore_direction") = false,
-             py::arg("shape") = "Hermite")
+             py::arg("exit_speed"), py::arg("backwards") = false,
+             py::arg("ignore_direction") = false,
+             py::arg("shape") = "Hermite", py::arg("timed_elastic") = true)
         .def("command", &DriftGuide::command,
              py::arg("x_in"), py::arg("y_in"), py::arg("theta"), py::arg("v_lin"), py::arg("v_ang"))
+        .def("path", &DriftGuide::path,
+             py::arg("x_in"), py::arg("y_in"), py::arg("theta"),
+             py::arg("v_lin") = 0.0, py::arg("v_ang") = 0.0)
+        .def("base_path", &DriftGuide::base_path,
+             py::arg("x_in"), py::arg("y_in"), py::arg("theta"),
+             py::arg("v_lin") = 0.0, py::arg("v_ang") = 0.0)
         .def("configure", &DriftGuide::configure,
              py::arg("ks_lin"), py::arg("kv_lin"), py::arg("ka_lin"),
              py::arg("ks_ang"), py::arg("kv_ang"), py::arg("ka_ang"),
@@ -237,11 +338,21 @@ PYBIND11_MODULE(plant, m) {
         .def("reset", &PlantSim::reset,
              py::arg("x_in"), py::arg("y_in"), py::arg("theta"),
              py::arg("v_lin") = 0.0, py::arg("v_lat") = 0.0, py::arg("v_ang") = 0.0)
+        .def("localize_reset", &PlantSim::localizeReset,
+             py::arg("x_in"), py::arg("y_in"), py::arg("theta"),
+             py::arg("v_lin") = 0.0, py::arg("v_lat") = 0.0, py::arg("v_ang") = 0.0,
+             py::arg("seed") = 1)
         .def("step", &PlantSim::step, py::arg("surge"), py::arg("sway"), py::arg("yaw"))
         .def("state", &PlantSim::state)
+        .def("estimate", &PlantSim::estimate)
         .def("set_dynamics", &PlantSim::setDynamics,
              py::arg("velocity_tau"), py::arg("skid_tau"),
-             py::arg("resistance"), py::arg("speed_scale"));
+             py::arg("resistance"), py::arg("speed_scale"))
+        .def("dynamics", [](const PlantSim& sim) {
+            const MockDrive::Dynamics d = sim.dynamics();
+            return py::make_tuple(d.velocity_tau, d.skid_tau, d.side_resistance, d.speed_scale);
+        })
+        .def("set_goal_align", &PlantSim::setGoalAlign, py::arg("enabled"));
 
     py::class_<DrivePolicy::Reading>(m, "Reading")
         .def_property_readonly("features", [](const DrivePolicy::Reading& reading) {
@@ -252,41 +363,66 @@ PYBIND11_MODULE(plant, m) {
         .def_readonly("heading_error_rad", &DrivePolicy::Reading::heading_error_rad)
         .def_readonly("at_target", &DrivePolicy::Reading::at_target);
 
-    m.def("read_policy", [](double prev_surge, double prev_sway, double prev_yaw,
-                            double path_phi, double vel_heading, double dphi_ds, double d2phi_ds2,
-                            double target_thrust, double cross_track_in) {
-        DrivePolicy::FollowInput in;
-        in.prev_surge = prev_surge;
-        in.prev_sway = prev_sway;
-        in.prev_yaw = prev_yaw;
+    auto loadInput = [](DrivePolicy::FollowInput& in,
+                        const std::vector<double>& v_surge, const std::vector<double>& v_sway,
+                        const std::vector<double>& v_yaw, const std::vector<double>& a_surge,
+                        const std::vector<double>& a_yaw, const std::vector<double>& look_x,
+                        const std::vector<double>& look_y, double path_phi, double body_heading,
+                        double target_thrust, double cross_track_in) {
+        auto copy = [](const std::vector<double>& src, double* dst, int n) {
+            for (int i = 0; i < n; ++i) dst[i] = 0.0;
+            const int have = static_cast<int>(src.size());
+            const int use = have < n ? have : n;
+            for (int i = 0; i < use; ++i) dst[i] = src[i];
+        };
+        copy(v_surge, in.v_surge, DrivePolicy::kHistory);
+        copy(v_sway, in.v_sway, DrivePolicy::kHistory);
+        copy(v_yaw, in.v_yaw, DrivePolicy::kHistory);
+        copy(a_surge, in.a_surge, DrivePolicy::kHistory);
+        copy(a_yaw, in.a_yaw, DrivePolicy::kHistory);
+        copy(look_x, in.look_x_m, DrivePolicy::kLookahead);
+        copy(look_y, in.look_y_m, DrivePolicy::kLookahead);
         in.path_phi = path_phi;
-        in.vel_heading = vel_heading;
-        in.dphi_ds = dphi_ds;
-        in.d2phi_ds2 = d2phi_ds2;
+        in.body_heading = body_heading;
         in.target_thrust = target_thrust;
         in.cross_track_in = cross_track_in;
+    };
+
+    m.def("read_policy", [loadInput](const std::vector<double>& v_surge,
+                                     const std::vector<double>& v_sway,
+                                     const std::vector<double>& v_yaw,
+                                     const std::vector<double>& a_surge,
+                                     const std::vector<double>& a_yaw,
+                                     const std::vector<double>& look_x,
+                                     const std::vector<double>& look_y,
+                                     double path_phi, double body_heading,
+                                     double target_thrust, double cross_track_in) {
+        DrivePolicy::FollowInput in;
+        loadInput(in, v_surge, v_sway, v_yaw, a_surge, a_yaw, look_x, look_y,
+                  path_phi, body_heading, target_thrust, cross_track_in);
         return DrivePolicy::read(in);
-    }, py::arg("prev_surge"), py::arg("prev_sway"), py::arg("prev_yaw"),
-       py::arg("path_phi"), py::arg("vel_heading"), py::arg("dphi_ds"), py::arg("d2phi_ds2"),
+    }, py::arg("v_surge"), py::arg("v_sway"), py::arg("v_yaw"),
+       py::arg("a_surge"), py::arg("a_yaw"), py::arg("look_x"), py::arg("look_y"),
+       py::arg("path_phi"), py::arg("body_heading"),
        py::arg("target_thrust"), py::arg("cross_track_in"));
 
-    m.def("command", [](double prev_surge, double prev_sway, double prev_yaw,
-                        double path_phi, double vel_heading, double dphi_ds, double d2phi_ds2,
-                        double target_thrust, double cross_track_in) {
+    m.def("command", [loadInput](const std::vector<double>& v_surge,
+                                 const std::vector<double>& v_sway,
+                                 const std::vector<double>& v_yaw,
+                                 const std::vector<double>& a_surge,
+                                 const std::vector<double>& a_yaw,
+                                 const std::vector<double>& look_x,
+                                 const std::vector<double>& look_y,
+                                 double path_phi, double body_heading,
+                                 double target_thrust, double cross_track_in) {
         DrivePolicy::FollowInput in;
-        in.prev_surge = prev_surge;
-        in.prev_sway = prev_sway;
-        in.prev_yaw = prev_yaw;
-        in.path_phi = path_phi;
-        in.vel_heading = vel_heading;
-        in.dphi_ds = dphi_ds;
-        in.d2phi_ds2 = d2phi_ds2;
-        in.target_thrust = target_thrust;
-        in.cross_track_in = cross_track_in;
+        loadInput(in, v_surge, v_sway, v_yaw, a_surge, a_yaw, look_x, look_y,
+                  path_phi, body_heading, target_thrust, cross_track_in);
         const CommandVector cmd = DrivePolicy::command(in);
         return py::make_tuple(cmd.surge, cmd.sway, cmd.yaw);
-    }, py::arg("prev_surge"), py::arg("prev_sway"), py::arg("prev_yaw"),
-       py::arg("path_phi"), py::arg("vel_heading"), py::arg("dphi_ds"), py::arg("d2phi_ds2"),
+    }, py::arg("v_surge"), py::arg("v_sway"), py::arg("v_yaw"),
+       py::arg("a_surge"), py::arg("a_yaw"), py::arg("look_x"), py::arg("look_y"),
+       py::arg("path_phi"), py::arg("body_heading"),
        py::arg("target_thrust"), py::arg("cross_track_in"));
 
     m.def("assign_weights", [](const std::vector<float>& weights) {
@@ -315,6 +451,7 @@ PYBIND11_MODULE(plant, m) {
     m.attr("ANG_KA_MOTOR_COUNT") = Feedforward::ANG_KA_MOTOR_COUNT;
     m.attr("EXP_RATE") = Drift::EXP_RATE;
     m.attr("DRIFT_ACCEL") = Drift::DRIFT_ACCEL;
+    m.attr("CENTRIPETAL_ACCEL") = Drift::CENTRIPETAL_ACCEL;
     m.attr("PATH_ACCEL") = Drift::PATH_ACCEL;
     m.attr("MAX_SLIP_RAD") = Drift::MAX_SLIP_RAD;
     m.attr("K_SLIP") = Drift::K_SLIP;
@@ -341,6 +478,12 @@ PYBIND11_MODULE(plant, m) {
     m.attr("HEAD_WINDUP") = Boomerang::Angular.windup;
     m.attr("SETTLE_IN") = Boomerang::Lateral.small_error;
     m.attr("SETTLE_DEG") = Boomerang::Angular.small_error;
+    m.attr("SETTLE_LARGE_IN") = Boomerang::Lateral.large_error;
+    m.attr("SETTLE_LARGE_DEG") = Boomerang::Angular.large_error;
+    // DriftFollower holds the tight window for Lateral.small_ms and the wide
+    // window for Lateral.large_ms. The tuner stops its clock on those dwells.
+    m.attr("SETTLE_SMALL_S") = Boomerang::Lateral.small_ms / 1000.0;
+    m.attr("SETTLE_LARGE_S") = Boomerang::Lateral.large_ms / 1000.0;
     m.attr("SETTLE_SPEED") = Motion::SETTLE_SPEED_MPS;
     m.attr("MIN_ACCEL") = Motion::MIN_ACCEL_MPS2;
     m.attr("KAPPA_EPS") = Motion::KAPPA_EPS;
@@ -349,7 +492,21 @@ PYBIND11_MODULE(plant, m) {
     m.attr("METERS_PER_INCH") = kMetersPerInch;
     m.attr("MAX_VOLTS") = System::MAX_VOLTS;
     m.attr("MAX_VEL_LIN") = Robot::MAX_VEL_LIN;
+    m.attr("MAX_VEL_ANG") = Robot::MAX_VEL_ANG;
+    m.attr("HISTORY") = DrivePolicy::kHistory;
+    m.attr("HISTORY_LAG") = std::vector<int>(
+        DrivePolicy::kHistoryLag, DrivePolicy::kHistoryLag + DrivePolicy::kHistory);
+    m.attr("LOOKAHEAD") = DrivePolicy::kLookahead;
+    m.attr("LOOK_NORM_M") = DrivePolicy::kLookNormM;
+    m.attr("LOOKAHEAD_M") = std::vector<double>(
+        DrivePolicy::kLookaheadM, DrivePolicy::kLookaheadM + DrivePolicy::kLookahead);
     m.attr("FIELD_HALF_IN") = metersToInches(Robot::Range::FIELD_HALF_M);
+    m.attr("FIELD_SIZE_IN") = Robot::Range::FIELD_SIZE_IN;
+    m.attr("FIELD_X_MIN_IN") = metersToInches(Robot::Range::FIELD_X_MIN_M);
+    m.attr("FIELD_X_MAX_IN") = metersToInches(Robot::Range::FIELD_X_MAX_M);
+    m.attr("FIELD_Y_MIN_IN") = metersToInches(Robot::Range::FIELD_Y_MIN_M);
+    m.attr("FIELD_Y_MAX_IN") = metersToInches(Robot::Range::FIELD_Y_MAX_M);
+    m.attr("FIELD_CENTER_Y_IN") = Robot::Range::CENTER_Y_IN;
     m.attr("FEATURE_COUNT") = DrivePolicy::kFeatures;
     m.attr("KAPPA_UNIT_PER_IN") = DrivePolicy::kKappaUnitPerIn;
     m.attr("KAPPA_RATE_UNIT") = DrivePolicy::kKappaRateUnit;

@@ -76,7 +76,18 @@ void endPresentation() {
 std::int32_t g_press0 = 0;
 bool g_press_init = false;
 
+// L1+L2+R1+R2, the same chord that aborts a routine. A failed read is not
+// a press, so a missing controller does not skip the clip.
+bool shoulderHalt() {
+    auto down = [](pros::controller_digital_e_t button) {
+        return pros::c::controller_get_digital(pros::E_CONTROLLER_MASTER, button) == 1;
+    };
+    return down(pros::E_CONTROLLER_DIGITAL_L1) && down(pros::E_CONTROLLER_DIGITAL_L2)
+        && down(pros::E_CONTROLLER_DIGITAL_R1) && down(pros::E_CONTROLLER_DIGITAL_R2);
+}
+
 bool userSkipped() {
+    if (shoulderHalt()) return true;
     pros::screen_touch_status_s_t status = pros::c::screen_touch_status();
     if (!g_press_init) {
         g_press0 = status.press_count;
@@ -101,10 +112,6 @@ bool presentFrame(std::uint32_t* pixels, std::uint32_t hold_ms) {
 
 void endPresentation() {
     g_press_init = false;
-    // Do not screen_erase() here. LLEMU is already up, and taking the display
-    // again to clear it deadlocks the brain at the last frame. The next
-    // status print redraws the screen.
-    pros::delay(20);
 }
 
 #endif
@@ -121,7 +128,13 @@ int playFrameSequence(const FrameSequence& seq) {
     else if (seq.fps >= 1000.0)
         period = 1;
 
+#if defined(ROBOT_HOST)
     std::vector<std::uint32_t> screen;
+#else
+    // The V5 blit keeps this pointer. A local vector would be freed on
+    // return, while the panel can still be scanning it.
+    static std::vector<std::uint32_t> screen;
+#endif
     char previous[512] = "";
     int shown = 0;
     bool started = false;
@@ -129,6 +142,11 @@ int playFrameSequence(const FrameSequence& seq) {
     for (int n = 0; seq.frame_count <= 0 || n < seq.frame_count; ++n) {
         if (n >= kMaxSource) break;
         if ((n % step) != 0) continue;
+#if !defined(ROBOT_HOST)
+        // Stop before decoding the next file. presentFrame also polls, but
+        // a shoulder chord held during a slow card read should not wait.
+        if (userSkipped()) break;
+#endif
 
         char path[512];
         int wrote = std::snprintf(path, sizeof(path), seq.path_format, seq.first_frame + n);

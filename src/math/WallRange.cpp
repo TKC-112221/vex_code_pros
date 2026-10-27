@@ -38,26 +38,29 @@ struct RayPick {
 
 template <typename T>
 RayPick<T> closestWall(T ox, T oy, T dx, T dy) {
-    const T H = static_cast<T>(Robot::Range::FIELD_HALF_M);
-    const T limit = H + static_cast<T>(1.0e-6);
+    const T x_lo = static_cast<T>(Robot::Range::FIELD_X_MIN_M);
+    const T x_hi = static_cast<T>(Robot::Range::FIELD_X_MAX_M);
+    const T y_lo = static_cast<T>(Robot::Range::FIELD_Y_MIN_M);
+    const T y_hi = static_cast<T>(Robot::Range::FIELD_Y_MAX_M);
+    const T eps = static_cast<T>(1.0e-6);
     const T t_min = static_cast<T>(1.0e-4);
     const T dir_min = static_cast<T>(1.0e-8);
     RayPick<T> best;
-    auto take = [&](T t, T along, int axis) {
+    auto take = [&](T t, T along, T along_lo, T along_hi, int axis) {
         if (!(t > t_min) || t >= best.t) return;
-        if (std::fabs(along) > limit) return;
+        if (along < along_lo - eps || along > along_hi + eps) return;
         if (!std::isfinite(t)) return;
         best.hit = true;
         best.t = t;
         best.axis = axis;
     };
     if (std::fabs(dx) > dir_min) {
-        const T walls[2] = { H, -H };
-        for (T W : walls) take((W - ox) / dx, oy + ((W - ox) / dx) * dy, 0);
+        const T walls[2] = { x_hi, x_lo };
+        for (T W : walls) take((W - ox) / dx, oy + ((W - ox) / dx) * dy, y_lo, y_hi, 0);
     }
     if (std::fabs(dy) > dir_min) {
-        const T walls[2] = { H, -H };
-        for (T W : walls) take((W - oy) / dy, ox + ((W - oy) / dy) * dx, 1);
+        const T walls[2] = { y_hi, y_lo };
+        for (T W : walls) take((W - oy) / dy, ox + ((W - oy) / dy) * dx, x_lo, x_hi, 1);
     }
     return best;
 }
@@ -74,7 +77,6 @@ T beamLength(T x, T y, T cos_th, T sin_th, T mount_x, T mount_y, T cos_yaw, T si
 
 RangeSolve refine(double theta, const DistanceReading* distance, int count,
                   double x, double y) {
-    const double H = Robot::Range::FIELD_HALF_M;
     const double margin = WallSolve::FIELD_MARGIN_M;
     RangeSolve sol;
     sol.x = x;
@@ -108,10 +110,7 @@ RangeSolve refine(double theta, const DistanceReading* distance, int count,
         if (step_y < -0.50) step_y = -0.50;
         sol.x += step_x;
         sol.y += step_y;
-        if (sol.x > H - margin) sol.x = H - margin;
-        if (sol.x < -H + margin) sol.x = -H + margin;
-        if (sol.y > H - margin) sol.y = H - margin;
-        if (sol.y < -H + margin) sol.y = -H + margin;
+        Robot::clampFieldMeters(sol.x, sol.y, margin);
         if (step_x * step_x + step_y * step_y < 1e-8) break;
     }
 
@@ -181,7 +180,10 @@ RangeSolve solveRanges(double theta, const DistanceReading* distance, int count)
 
     const double c = std::cos(theta);
     const double s = std::sin(theta);
-    const double H = Robot::Range::FIELD_HALF_M;
+    const double x_lo = Robot::Range::FIELD_X_MIN_M;
+    const double x_hi = Robot::Range::FIELD_X_MAX_M;
+    const double y_lo = Robot::Range::FIELD_Y_MIN_M;
+    const double y_hi = Robot::Range::FIELD_Y_MAX_M;
     double gx = 0, gy = 0;
     int nx = 0, ny = 0;
     for (int i = 0; i < count; ++i) {
@@ -193,26 +195,27 @@ RangeSolve solveRanges(double theta, const DistanceReading* distance, int count)
         const double rx = mount.x * c - mount.y * s;
         const double ry = mount.x * s + mount.y * c;
         if (std::fabs(dx) >= std::fabs(dy)) {
-            const double W = (dx >= 0.0) ? H : -H;
+            const double W = (dx >= 0.0) ? x_hi : x_lo;
             gx += W - distance[i].range_m * dx - rx;
             ++nx;
         } else {
-            const double W = (dy >= 0.0) ? H : -H;
+            const double W = (dy >= 0.0) ? y_hi : y_lo;
             gy += W - distance[i].range_m * dy - ry;
             ++ny;
         }
     }
-    const double x0 = (nx > 0) ? gx / static_cast<double>(nx) : 0.0;
-    const double y0 = (ny > 0) ? gy / static_cast<double>(ny) : 0.0;
+    const double x0 = (nx > 0) ? gx / static_cast<double>(nx) : Robot::Range::CENTER_X_M;
+    const double y0 = (ny > 0) ? gy / static_cast<double>(ny) : Robot::Range::CENTER_Y_M;
 
     const RangeSolve from_beams = refine(theta, distance, count, x0, y0);
-    const RangeSolve from_origin = refine(theta, distance, count, 0.0, 0.0);
-    if (from_beams.ok && from_origin.ok) {
-        return (from_beams.mae_m <= from_origin.mae_m) ? from_beams : from_origin;
+    const RangeSolve from_center = refine(theta, distance, count,
+                                          Robot::Range::CENTER_X_M, Robot::Range::CENTER_Y_M);
+    if (from_beams.ok && from_center.ok) {
+        return (from_beams.mae_m <= from_center.mae_m) ? from_beams : from_center;
     }
     if (from_beams.ok) return from_beams;
-    if (from_origin.ok) return from_origin;
-    return (from_beams.mae_m <= from_origin.mae_m) ? from_beams : from_origin;
+    if (from_center.ok) return from_center;
+    return (from_beams.mae_m <= from_center.mae_m) ? from_beams : from_center;
 }
 
 bool nudgePosition(double& x, double& y, double theta,
@@ -312,9 +315,7 @@ bool nudgePosition(double& x, double& y, double theta,
     x += dx;
     y += dy;
 
-    const double lim = Robot::Range::FIELD_HALF_M - 0.18;
-    x = mathutil::clamp_val(x, -lim, lim);
-    y = mathutil::clamp_val(y, -lim, lim);
+    Robot::clampFieldMeters(x, y, 0.18);
     return true;
 }
 

@@ -16,7 +16,7 @@
 
 class NeuralNetwork {
 public:
-    enum class Activation { IDENTITY, TANH, RELU, LEAKY_RELU };
+    enum class Activation { IDENTITY, TANH, RELU, LEAKY_RELU, SILU };
 
     // Includes the input and output layers. Widest layer the scratch buffers hold.
     static constexpr int kMaxLayers = 8;

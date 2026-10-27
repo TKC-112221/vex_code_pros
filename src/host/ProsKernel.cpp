@@ -4,8 +4,10 @@
  * text. Brain LLEMU text is stored for the field window.
  *
  * Linked only by the host build. The V5 image gets these from libpros.
- * clang++ on the MSVC target does not pass /subsystem to lld-link, so the
- * pragma below gives the simulation executable a console subsystem.
+ * The host recipe targets x86_64-w64-windows-gnu, whose driver gives a
+ * console subsystem to a program that defines main. The pragma covers a
+ * build that still uses the MSVC target, where clang++ does not pass
+ * --subsystem through to lld-link.
  * ------------------------------------------------------------------------- */
 #if defined(_MSC_VER)
 #pragma comment(linker, "/SUBSYSTEM:CONSOLE")

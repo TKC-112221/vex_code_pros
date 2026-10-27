@@ -64,6 +64,16 @@ public:
         return slots_[index_].command->samplePath(from, out, cap, v_lin, v_ang);
     }
 
+    // The live follower only needs the active leg. The selector draws every
+    // leg, including ones that have not started.
+    int appendRoute(Pose2d& from, Pose2d* out, int count, int cap) const override {
+        for (const auto& slot : slots_) {
+            if (!slot.command || count >= cap) break;
+            count = slot.command->appendRoute(from, out, count, cap);
+        }
+        return count;
+    }
+
 private:
     std::vector<CommandSlot> slots_;
     std::size_t index_ = 0;
@@ -194,6 +204,11 @@ public:
                    double v_lin, double v_ang) const override {
         if (!deadline_) return 0;
         return deadline_->samplePath(from, out, cap, v_lin, v_ang);
+    }
+
+    int appendRoute(Pose2d& from, Pose2d* out, int count, int cap) const override {
+        if (!deadline_) return count;
+        return deadline_->appendRoute(from, out, count, cap);
     }
 
 private:

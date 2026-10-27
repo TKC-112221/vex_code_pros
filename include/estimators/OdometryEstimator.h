@@ -18,7 +18,7 @@
 class OdometryEstimator : public IEstimator {
 public:
     void reset() override {
-        odom_.setPose(Pose2d{});
+        odom_.setPose(Pose2d{Robot::Range::CENTER_X_M, Robot::Range::CENTER_Y_M, 0.0});
         total_heading_ = 0.0;
         prev_theta_ = 0.0;
         v_lin_ = v_ang_ = 0.0;

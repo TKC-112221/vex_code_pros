@@ -191,12 +191,15 @@ ChassisCommand DriftCurve::compute(const StateEstimate& state) {
     const double nose = forwards
         ? approach
         : mathutil::normalize_angle(approach + Robot::PI);
+    const double path_drive = forwards ? 1.0 : -1.0;
     const bool close = dist < config.close_m;
     const Finish fin = finishOf(rx, ry, tx, ty, approach, target.line_length);
 
     double phi = approach;
     double kappa = 0.0;
     double length_m = dist;
+    SpeedKnot knots[kSpeedKnots];
+    int kn = 0;
     if (fin.on_line) {
         // Already on the straight finish. Hold the exit heading to the target.
         phi = approach;
@@ -226,6 +229,7 @@ ChassisCommand DriftCurve::compute(const StateEstimate& state) {
                 if (look > look_cap) look = look_cap;
                 quinticLook(path, look, phi, kappa);
             }
+            kn = quinticKnots(path, knots, kSpeedKnots);
         } else if (config.shape == DriftCurveShape::Exponential
             || config.shape == DriftCurveShape::Quartic
             || config.shape == DriftCurveShape::QuarticHermite) {
@@ -249,32 +253,52 @@ ChassisCommand DriftCurve::compute(const StateEstimate& state) {
                 if (look > look_cap) look = look_cap;
                 graphLook(path, look, phi, kappa);
             }
+            kn = graphKnots(path, knots, kSpeedKnots);
         } else {
             const Arc arc = arcThrough(rx, ry, fit_x, fit_y, approach);
             phi = arc.phi;
             kappa = arc.kappa;
             length_m = arc.length_m;
+            kn = arcKnots(arc, knots, kSpeedKnots);
         }
-        if (to_join) length_m += fin.length;
+        if (to_join) {
+            length_m += fin.length;
+            kn = appendSpan(knots, kn, kSpeedKnots, fin.length);
+        }
     }
     if (length_m < 0.0) length_m = 0.0;
 
-    // Fastest travel speed that still reaches v_end under the accel limit,
-    // then stepped from the measured speed so this tick stays inside it.
+    // Ceiling from the timed profile, then stepped from the measured speed
+    // so this tick stays inside the longitudinal accel.
     const double v_end = std::fabs(target.exit_speed);
-    double v_max = config.cruise_speed;
-    if (v_max < v_end) v_max = v_end;
     double accel = target.max_accel.value_or(config.path_accel);
     if (accel < Motion::MIN_ACCEL_MPS2) accel = Motion::MIN_ACCEL_MPS2;
-    const double v_brake = std::sqrt(v_end * v_end + 2.0 * accel * length_m);
-    const double v_ideal = (v_brake < v_max) ? v_brake : v_max;
-    const double v_now = (forwards ? 1.0 : -1.0) * state.v_lin;
+    const SpeedScale pace = scaleSpeed(config.speed_reward, accel, config.centripetal_accel);
+    accel = pace.accel;
+    if (kn < 2) {
+        knots[0].s = 0.0;
+        knots[0].kappa = kappa;
+        knots[0].dk = 0.0;
+        knots[1].s = length_m;
+        knots[1].kappa = 0.0;
+        knots[1].dk = 0.0;
+        kn = 2;
+    }
+    fillSpeedSlope(knots, kn);
+    double v_ideal = feasibleSpeedAt(knots, kn, 0.0, v_end, config.cruise_speed, pace.accel,
+                                      pace.centripetal, Robot::MAX_VEL_ANG, pace.yaw_accel);
+    if (!std::isfinite(v_ideal) || v_ideal < 0.0) v_ideal = 0.0;
+    const double v_now = path_drive * state.v_lin;
+    // Slew the nose speed. A travel-frame slew multiplied by the drive sign
+    // copies a backward measurement into the command.
     const double step = accel * System::DT_SEC;
-    double v_plan = v_ideal;
-    if (v_plan > v_now + step) v_plan = v_now + step;
-    if (v_plan < v_now - step) v_plan = v_now - step;
-    const double a_travel = (v_plan - v_now) / System::DT_SEC;
-    const double v_ref = (v_plan > 0.0) ? v_plan : 0.0;
+    const double v_des = path_drive * v_ideal;
+    double v_cmd_slew = v_des;
+    if (v_cmd_slew > state.v_lin + step) v_cmd_slew = state.v_lin + step;
+    if (v_cmd_slew < state.v_lin - step) v_cmd_slew = state.v_lin - step;
+    const double a_cmd_slew = (v_cmd_slew - state.v_lin) / System::DT_SEC;
+    const double v_travel = path_drive * v_cmd_slew;
+    const double v_ref = (v_travel > 0.0) ? v_travel : 0.0;
 
     // tan(σ) = v_ref² κ / a_ref. A full stop inside close_m faces the heading.
     const bool stop_settle = close && v_end < 1e-3;
@@ -285,7 +309,7 @@ ChassisCommand DriftCurve::compute(const StateEstimate& state) {
     }
 
     double psi = mathutil::normalize_angle(phi + sigma);
-    if (!forwards) psi = mathutil::normalize_angle(psi + Robot::PI);
+    if (path_drive < 0.0) psi = mathutil::normalize_angle(psi + Robot::PI);
     // A prescribed finish heading. With ignore_direction the nose stays
     // where it is, and only the speed is driven to exit_speed.
     if (stop_settle && !target.ignore_direction) psi = nose;
@@ -298,15 +322,14 @@ ChassisCommand DriftCurve::compute(const StateEstimate& state) {
     const double small_deg = Boomerang::Angular.small_error;
     const double heading_to_goal_deg =
         mathutil::normalize_angle(nose - theta) * (180.0 / Robot::PI);
-    const double direction = forwards ? 1.0 : -1.0;
     const bool heading_ok = target.ignore_direction
         || std::fabs(heading_to_goal_deg) < small_deg;
     settled_ = (dist / kMetersPerInch) < small_in
             && heading_ok
             && std::fabs(v_now - v_end) < Motion::SETTLE_SPEED_MPS;
 
-    const double v_cmd = direction * v_plan;
-    const double a_cmd = direction * a_travel;
+    const double v_cmd = v_cmd_slew;
+    const double a_cmd = a_cmd_slew;
     double omega = v_ref * kappa;
     double radius = Physics::TURN_RADIUS_MAX_M;
     if (std::fabs(kappa) > Motion::KAPPA_EPS) radius = 1.0 / std::fabs(kappa);

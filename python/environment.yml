@@ -1,0 +1,19 @@
+name: py_env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - ninja
+  - cmake
+  - python=3.10
+  - pip
+  - pip:
+    - gymnasium>=0.29
+    - stable-baselines3>=2.2
+    - torch --index-url https://download.pytorch.org/whl/cu132
+    - torchvision --index-url https://download.pytorch.org/whl/cu132
+    - numpy
+    - pybind11
+    - matplotlib
+    - cma>=3.3
+    - optuna

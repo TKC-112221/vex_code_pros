@@ -1,25 +1,28 @@
 """Gymnasium env: follow a generated path and its thrust schedule.
 
-One action is one 10 ms plant step. The observation is DrivePolicy::read:
+One action is one 10 ms plant step. The actor observation is
+DrivePolicy::read:
 
-    previous chassis command,
-    direction of the velocity relative to the path tangent,
-    dφ/ds and d²φ/ds² of that tangent,
+    six strided frames of body velocity and the surge/yaw command,
+    newest first, at the lags published by the plant binding,
+    the path tangent 0.2 m ahead against the chassis heading,
+    body-frame path points at 0.2, 0.5, 1.0, and 1.5 m,
     the thrust the schedule wants right now,
     signed cross-track.
 
-φ is the path heading a short distance ahead. Its arc-length derivatives
-are zero on a straight. The action is still surge, sway, and yaw: this
-actor replaces DriftFollower, so the steer is part of the command.
+The action is surge and yaw. This chassis cannot command sway, so the
+plant step sends that axis as zero. reset() returns a dict: "obs" is the
+actor vector, "priv" is the ground-truth pose, slip, and the friction
+parameters the critic sees during training.
 
 The thrust schedule is full throttle except on clock ramps. A ramp falls
 to zero and rises back at a constant slope in time, whether or not the
 robot is moving.
 
-Every step is scored. There is no terminal bonus. The thrust term is the
-weight times the negative absolute error. The path term is the user's
-asymmetric scale applied to how fast the distance to the path is closing,
-minus a small weight on that distance:
+Every step is scored. The thrust term is the weight times the negative
+absolute error. The path term is the user's asymmetric scale applied to
+how fast the distance to the path is closing, minus a small weight on
+that distance:
 
     0.8 * x if x > 0 else x
     - DIST_WEIGHT * distance
@@ -30,9 +33,13 @@ back cannot profit. The distance term is the rent for staying off the
 line after that excursion. The raw distance derivative (positive when
 the gap is opening) would flip the sign and pay the robot to leave.
 
-The episode ends when the cross-track passes DIVERGE_IN, when the robot
-reaches the end of the path still inside that band, or when the clock
-for this path runs out.
+The episode ends when the cross-track passes DIVERGE_IN, when the chassis
+is inside the same arrival the tuner uses (within FINISH_RADIUS_IN of the
+path end, yaw rate within FINISH_YAW_RAD_S of zero, and the distance to
+that end has started to grow), or when the clock for this path runs out.
+The last stage samples two field poses and connects them with a
+turn-straight-turn at the tightest planned radius. That arrival also
+requires the nose to be within POSE_HEAD_DEG of the exit heading.
 """
 
 import sys
@@ -45,6 +52,7 @@ from gymnasium import spaces
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import path_params as P
 import plant
+from optimize_tuning import PoseSettle
 
 
 def _wrap_angle(angle):
@@ -207,23 +215,197 @@ def _generate_local(rng, stage):
     return path
 
 
+def _field_box():
+    margin = P.WALL_MARGIN_IN
+    return (
+        float(plant.FIELD_X_MIN_IN) + margin,
+        float(plant.FIELD_X_MAX_IN) - margin,
+        float(plant.FIELD_Y_MIN_IN) + margin,
+        float(plant.FIELD_Y_MAX_IN) - margin,
+    )
+
+
 def _place_on_field(rng, path):
     ang = float(rng.uniform(-np.pi, np.pi))
     c = np.cos(ang)
     s = np.sin(ang)
     x = path.x * c - path.y * s
     y = path.x * s + path.y * c
-    half = float(plant.FIELD_HALF_IN) - P.WALL_MARGIN_IN
+    x_min, x_max, y_min, y_max = _field_box()
     minx, maxx = float(x.min()), float(x.max())
     miny, maxy = float(y.min()), float(y.max())
-    if maxx - minx > 2.0 * half or maxy - miny > 2.0 * half:
+    if maxx - minx > x_max - x_min or maxy - miny > y_max - y_min:
         return False
-    ox = float(rng.uniform(-half - minx, half - maxx))
-    oy = float(rng.uniform(-half - miny, half - maxy))
+    ox = float(rng.uniform(x_min - minx, x_max - maxx))
+    oy = float(rng.uniform(y_min - miny, y_max - maxy))
     path.x = np.ascontiguousarray(x + ox)
     path.y = np.ascontiguousarray(y + oy)
     path.theta = np.ascontiguousarray(path.theta + ang)
     return True
+
+
+def _mod2pi(angle):
+    return float(angle - 2.0 * np.pi * np.floor(angle / (2.0 * np.pi)))
+
+
+def _dubins_segments(alpha, beta, d):
+    """Turn-straight-turn families. Lengths are in units of the turn radius."""
+    ca = float(np.cos(alpha))
+    sa = float(np.sin(alpha))
+    cb = float(np.cos(beta))
+    sb = float(np.sin(beta))
+    cab = float(np.cos(alpha - beta))
+    found = []
+
+    tmp0 = d + sa - sb
+    p2 = 2.0 + d * d - 2.0 * cab + 2.0 * d * (sa - sb)
+    if p2 >= 0.0:
+        tmp1 = float(np.arctan2(cb - ca, tmp0))
+        found.append((_mod2pi(-alpha + tmp1), float(np.sqrt(p2)), _mod2pi(beta - tmp1), "LSL"))
+
+    tmp0 = d - sa + sb
+    p2 = 2.0 + d * d - 2.0 * cab + 2.0 * d * (sb - sa)
+    if p2 >= 0.0:
+        tmp1 = float(np.arctan2(ca - cb, tmp0))
+        found.append((_mod2pi(alpha - tmp1), float(np.sqrt(p2)), _mod2pi(-beta + tmp1), "RSR"))
+
+    p2 = -2.0 + d * d + 2.0 * cab + 2.0 * d * (sa + sb)
+    if p2 >= 0.0:
+        p = float(np.sqrt(p2))
+        tmp2 = float(np.arctan2(-ca - cb, d + sa + sb) - np.arctan2(-2.0, p))
+        found.append((_mod2pi(-alpha + tmp2), p, _mod2pi(-beta + tmp2), "LSR"))
+
+    p2 = d * d - 2.0 + 2.0 * cab - 2.0 * d * (sa + sb)
+    if p2 >= 0.0:
+        p = float(np.sqrt(p2))
+        tmp2 = float(np.arctan2(ca + cb, d - sa - sb) - np.arctan2(2.0, p))
+        found.append((_mod2pi(alpha - tmp2), p, _mod2pi(beta - tmp2), "RSL"))
+    return found
+
+
+_DUBINS_KIND = {
+    "LSL": ("L", "S", "L"),
+    "RSR": ("R", "S", "R"),
+    "LSR": ("L", "S", "R"),
+    "RSL": ("R", "S", "L"),
+}
+
+
+def _segment_pose(x, y, theta, amount, kind, radius):
+    if kind == "L":
+        return (
+            x + radius * (np.sin(theta + amount) - np.sin(theta)),
+            y + radius * (-np.cos(theta + amount) + np.cos(theta)),
+            theta + amount,
+            P.K_MAX,
+        )
+    if kind == "R":
+        return (
+            x + radius * (-np.sin(theta - amount) + np.sin(theta)),
+            y + radius * (np.cos(theta - amount) - np.cos(theta)),
+            theta - amount,
+            -P.K_MAX,
+        )
+    return (
+        x + radius * amount * np.cos(theta),
+        y + radius * amount * np.sin(theta),
+        theta,
+        0.0,
+    )
+
+
+def _sample_dubins(x0, y0, h0, segments, radius):
+    samples = []
+    x, y, theta = float(x0), float(y0), float(h0)
+    arc = 0.0
+    last_kappa = 0.0
+    for amount, kind in segments:
+        amount = float(amount)
+        length = amount * radius
+        if length < 1e-6:
+            continue
+        n = max(1, int(round(length / P.DS_IN)))
+        step_a = amount / n
+        step_s = length / n
+        for i in range(n):
+            px, py, pth, kappa = _segment_pose(x, y, theta, step_a * i, kind, radius)
+            samples.append((arc, px, py, pth, kappa, 0.0))
+            arc += step_s
+        x, y, theta, last_kappa = _segment_pose(x, y, theta, amount, kind, radius)
+    samples.append((arc, x, y, theta, last_kappa, 0.0))
+    return samples, (x, y, theta)
+
+
+def _inside_field(samples, box):
+    x0, x1, y0, y1 = box
+    for _s, x, y, _theta, _kappa, _dk in samples:
+        if x < x0 or x > x1 or y < y0 or y > y1:
+            return False
+    return True
+
+
+def _sample_pose(rng, box):
+    x0, x1, y0, y1 = box
+    return (
+        float(rng.uniform(x0, x1)),
+        float(rng.uniform(y0, y1)),
+        float(rng.uniform(-np.pi, np.pi)),
+    )
+
+
+def _pose_fallback():
+    n = P.FALLBACK_SAMPLES
+    s = np.linspace(0.0, P.FALLBACK_LENGTH_IN, n)
+    return _Path(
+        s,
+        s - P.FALLBACK_LENGTH_IN * 0.5,
+        np.full(n, float(plant.FIELD_CENTER_Y_IN)),
+        np.zeros(n),
+        np.zeros(n),
+        np.zeros(n),
+        0,
+    )
+
+
+def _pose_path(rng):
+    """Shortest in-bounds turn-straight-turn between two random field poses."""
+    box = _field_box()
+    radius = 1.0 / P.K_MAX
+    for _ in range(P.GENERATE_TRIES):
+        x0, y0, h0 = _sample_pose(rng, box)
+        x1, y1, h1 = _sample_pose(rng, box)
+        dx = x1 - x0
+        dy = y1 - y0
+        chord = float(np.hypot(dx, dy))
+        if chord < P.POSE_MIN_IN or chord > P.POSE_MAX_IN:
+            continue
+        bearing = float(np.arctan2(dy, dx))
+        alpha = _mod2pi(h0 - bearing)
+        beta = _mod2pi(h1 - bearing)
+        best = None
+        for t, p, q, name in _dubins_segments(alpha, beta, chord / radius):
+            length = (t + p + q) * radius
+            if length > P.POSE_MAX_LENGTH_IN:
+                continue
+            if best is not None and length >= best[0]:
+                continue
+            kinds = _DUBINS_KIND[name]
+            samples, end = _sample_dubins(
+                x0, y0, h0,
+                ((t, kinds[0]), (p, kinds[1]), (q, kinds[2])),
+                radius,
+            )
+            ex, ey, eh = end
+            if np.hypot(ex - x1, ey - y1) > 1.0 or abs(_wrap_angle(eh - h1)) > 0.05:
+                continue
+            if not _inside_field(samples, box):
+                continue
+            best = (length, samples)
+        if best is None:
+            continue
+        cols = np.asarray(best[1], dtype=np.float64)
+        return _Path(cols[:, 0], cols[:, 1], cols[:, 2], cols[:, 3], cols[:, 4], cols[:, 5], 0)
+    return _pose_fallback()
 
 
 def _fallback_path(rng, stage):
@@ -233,7 +415,7 @@ def _fallback_path(rng, stage):
     return _Path(
         s,
         s - P.FALLBACK_LENGTH_IN * 0.5,
-        np.zeros(n),
+        np.full(n, float(plant.FIELD_CENTER_Y_IN)),
         np.zeros(n),
         np.zeros(n),
         np.zeros(n),
@@ -241,7 +423,41 @@ def _fallback_path(rng, stage):
     )
 
 
+# Estimator noise on the actor's velocity history. The privileged critic
+# vector keeps the clean plant.
+_VEL_NOISE_MPS = 0.04
+_YAW_NOISE_RAD = 0.08
+
+
+def _dynamics_bounds():
+    """Uniform window around the nominal plant. Shared by reset and the critic."""
+    tau = float(plant.VELOCITY_TAU)
+    skid = float(plant.SKID_TAU)
+    resistance = float(plant.SIDE_RESISTANCE)
+    scale = float(plant.SPEED_SCALE)
+    return (
+        (0.5 * tau, 2.0 * tau),
+        (0.35 * skid, 3.0 * skid),
+        (0.65 * resistance, 1.6 * resistance),
+        (0.75 * scale, 1.15 * scale),
+    )
+
+
+def _sample_dynamics(rng):
+    """Uniform draw. Skid is the wide axis: tiles, dust, and roller wear."""
+    return tuple(float(rng.uniform(lo, hi)) for lo, hi in _dynamics_bounds())
+
+
+def _span_unit(value, bounds):
+    lo, hi = bounds
+    if hi <= lo:
+        return 0.0
+    return float(np.clip(2.0 * (value - lo) / (hi - lo) - 1.0, -1.0, 1.0))
+
+
 def generate_path(rng, stage):
+    if stage == "pose":
+        return _pose_path(rng)
     for _ in range(P.GENERATE_TRIES):
         path = _generate_local(rng, stage)
         if path is not None and _place_on_field(rng, path):
@@ -255,25 +471,35 @@ class PathFollowEnv(gym.Env):
     def __init__(self, gamma=P.DEFAULT_GAMMA):
         super().__init__()
         self.plant = plant.PlantSim()
+        # The grab is process-global and defaults on. One touch seats every
+        # later episode, including the other env, on that goal.
+        self.plant.set_goal_align(False)
         # Discount lives on the trainer. The step reward is undiscounted.
         self.gamma = float(gamma)
         self._stage = STAGES[-1]
-        self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(plant.FEATURE_COUNT,), dtype=np.float32
-        )
+        if not hasattr(plant, "HISTORY_LAG") or not hasattr(plant, "LOOKAHEAD_M"):
+            raise RuntimeError("plant module is stale; rebuild with python python/build_plant.py")
+        self._lags = np.asarray(plant.HISTORY_LAG, dtype=np.int64)
+        self._hist_depth = int(self._lags.max()) + 1
+        actor = spaces.Box(low=-np.inf, high=np.inf, shape=(int(plant.FEATURE_COUNT),), dtype=np.float32)
+        # pose (x, y, sin, cos), body velocity, and the four dynamics knobs.
+        priv = spaces.Box(low=-np.inf, high=np.inf, shape=(11,), dtype=np.float32)
+        self.observation_space = spaces.Dict({"obs": actor, "priv": priv})
         self.action_space = spaces.Box(
-            low=-1.0, high=1.0, shape=(plant.ACTION_COUNT,), dtype=np.float32
+            low=-1.0, high=1.0, shape=(int(plant.ACTION_COUNT),), dtype=np.float32
         )
         self._path = None
         self._hint = 0
         self._prev_dist = 0.0
-        self._prev_action = np.zeros(plant.ACTION_COUNT, dtype=np.float64)
+        self._prev_action = np.zeros(int(plant.ACTION_COUNT), dtype=np.float64)
+        self._hist = np.zeros((self._hist_depth, 5), dtype=np.float64)
         self._steps = 0
         self._horizon = P.MAX_HORIZON
         self._proj = None
         self._theta = 0.0
         self._thrust_err_sum = 0.0
         self._peak_cross = 0.0
+        self._arrival = PoseSettle()
         self._schedule = _ClockSchedule(())
 
     def set_stage(self, name):
@@ -298,12 +524,17 @@ class PathFollowEnv(gym.Env):
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
+        self.plant.set_goal_align(False)
+        velocity_tau, skid_tau, resistance, speed_scale = _sample_dynamics(self.np_random)
+        self.plant.set_dynamics(velocity_tau, skid_tau, resistance, speed_scale)
         self._path = generate_path(self.np_random, self._stage)
         self._hint = 0
         self._steps = 0
-        self._prev_action = np.zeros(plant.ACTION_COUNT, dtype=np.float64)
+        self._prev_action = np.zeros(int(plant.ACTION_COUNT), dtype=np.float64)
+        self._hist = np.zeros((self._hist_depth, 5), dtype=np.float64)
         self._thrust_err_sum = 0.0
         self._peak_cross = 0.0
+        self._arrival = PoseSettle()
         length = float(self._path.s[-1] - self._path.s[0])
         # 20 in/s is a slow crawl. Stops add two seconds each. A policy
         # that never leaves the start runs out the clock.
@@ -331,12 +562,17 @@ class PathFollowEnv(gym.Env):
         }
 
     def step(self, action):
-        command = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
+        command = np.clip(np.asarray(action, dtype=np.float64).reshape(-1), -1.0, 1.0)
         # The schedule the policy just saw. Scoring the later clock time
         # would charge a copy of that schedule for the step just taken.
         target = self.thrust_at(self._steps * _DT)
-        volts = command * _MAX_VOLTS
-        self.plant.step(float(volts[0]), float(volts[1]), float(volts[2]))
+        surge = float(command[0]) * _MAX_VOLTS
+        yaw = float(command[1]) * _MAX_VOLTS if command.size > 1 else 0.0
+        self._prev_action[:] = 0.0
+        self._prev_action[0] = float(command[0])
+        if command.size > 1 and self._prev_action.size > 1:
+            self._prev_action[1] = float(command[1])
+        self.plant.step(surge, 0.0, yaw)
         state = self.plant.state()
         self._theta = float(state.theta)
         proj = self._project(state.x_in, state.y_in)
@@ -353,7 +589,6 @@ class PathFollowEnv(gym.Env):
         )
 
         self._prev_dist = dist
-        self._prev_action = command
         self._steps += 1
         self._thrust_err_sum += abs(thrust - target)
         self._peak_cross = max(self._peak_cross, dist)
@@ -361,10 +596,17 @@ class PathFollowEnv(gym.Env):
         terminated = False
         truncated = False
         reason = ""
+        goal_dist = float(np.hypot(
+            state.x_in - self._path.x[-1], state.y_in - self._path.y[-1]))
+        goal_head_deg = abs(float(np.degrees(_wrap_angle(
+            float(self._path.theta[-1]) - float(state.theta)))))
+        settled = self._arrival.update(goal_dist, float(state.v_ang))
+        if self._stage == "pose" and goal_head_deg > P.POSE_HEAD_DEG:
+            settled = False
         if dist > P.DIVERGE_IN:
             terminated = True
             reason = "diverged"
-        elif proj["s"] >= float(self._path.s[-1]) - P.FINISH_IN:
+        elif settled:
             terminated = True
             reason = "finished"
         elif self._steps >= self._horizon:
@@ -378,6 +620,8 @@ class PathFollowEnv(gym.Env):
             "thrust": thrust,
             "path_s": float(proj["s"]),
             "reason": reason,
+            "goal_dist_in": goal_dist,
+            "goal_head_deg": goal_head_deg,
         }
         if terminated or truncated:
             info["is_success"] = reason == "finished"
@@ -395,7 +639,7 @@ class PathFollowEnv(gym.Env):
         # v * κ is the yaw rate the path wants. The 0.09 turns that into a
         # normalized yaw command; the heading and cross-track terms correct.
         yaw = P.YAW_HEADING * err - P.YAW_CROSS * proj["cross"] + P.YAW_CURVATURE * speed_ips * ahead["kappa"]
-        action = np.array([self.thrust_at(self._steps * _DT), 0.0, yaw], dtype=np.float32)
+        action = np.array([self.thrust_at(self._steps * _DT), yaw], dtype=np.float32)
         return np.clip(action, -1.0, 1.0)
 
     def _project(self, x, y):
@@ -456,29 +700,85 @@ class PathFollowEnv(gym.Env):
         def mix(values):
             return (1.0 - t) * float(values[index]) + t * float(values[index + 1])
 
-        return {"phi": mix(self._path.theta), "kappa": mix(self._path.kappa), "dk": mix(self._path.dk)}
+        return {
+            "x": mix(self._path.x),
+            "y": mix(self._path.y),
+            "phi": mix(self._path.theta),
+            "kappa": mix(self._path.kappa),
+            "dk": mix(self._path.dk),
+        }
 
-    def _velocity_heading(self, state):
-        vx = state.v_lin * np.cos(state.theta) - state.v_lat * np.sin(state.theta)
-        vy = state.v_lin * np.sin(state.theta) + state.v_lat * np.cos(state.theta)
-        if float(np.hypot(vx, vy)) < P.STOPPED_SPEED_MPS:
-            return float(state.theta)
-        return float(np.arctan2(vy, vx))
+    def _push_history(self, state):
+        self._hist[1:] = self._hist[:-1]
+        self._hist[0, 0] = float(state.v_lin) + float(self.np_random.normal(0.0, _VEL_NOISE_MPS))
+        self._hist[0, 1] = float(state.v_lat) + float(self.np_random.normal(0.0, _VEL_NOISE_MPS))
+        self._hist[0, 2] = float(state.v_ang) + float(self.np_random.normal(0.0, _YAW_NOISE_RAD))
+        self._hist[0, 3] = float(self._prev_action[0])
+        self._hist[0, 4] = float(self._prev_action[1]) if self._prev_action.size > 1 else 0.0
+
+    def _lookahead(self, state):
+        theta = float(state.theta)
+        c = float(np.cos(theta))
+        s = float(np.sin(theta))
+        inch = float(plant.METERS_PER_INCH)
+        s_end = float(self._path.s[-1])
+        xs = []
+        ys = []
+        for dist_m in plant.LOOKAHEAD_M:
+            sample = self._sample_at(min(self._proj["s"] + float(dist_m) / inch, s_end))
+            dx = (float(sample["x"]) - float(state.x_in)) * inch
+            dy = (float(sample["y"]) - float(state.y_in)) * inch
+            xs.append(c * dx + s * dy)
+            ys.append(-s * dx + c * dy)
+        return xs, ys
+
+    def _privileged(self, state):
+        half = float(plant.FIELD_HALF_IN)
+        center_y = float(plant.FIELD_CENTER_Y_IN)
+        lin = float(plant.MAX_VEL_LIN)
+        ang = float(plant.MAX_VEL_ANG)
+        tau, skid, resistance, scale = self.plant.dynamics()
+        bounds = _dynamics_bounds()
+        values = (
+            float(state.x_in) / half,
+            (float(state.y_in) - center_y) / half,
+            float(np.sin(state.theta)),
+            float(np.cos(state.theta)),
+            float(state.v_lin) / lin,
+            float(state.v_lat) / lin,
+            float(state.v_ang) / ang,
+            _span_unit(tau, bounds[0]),
+            _span_unit(skid, bounds[1]),
+            _span_unit(resistance, bounds[2]),
+            _span_unit(scale, bounds[3]),
+        )
+        return np.asarray(values, dtype=np.float32)
 
     def _obs(self, state):
-        ahead = self._sample_at(min(self._proj["s"] + P.LOOKAHEAD_IN, float(self._path.s[-1])))
+        self._push_history(state)
+        look_x, look_y = self._lookahead(state)
+        near = self._sample_at(
+            min(self._proj["s"] + float(plant.LOOKAHEAD_M[0]) / float(plant.METERS_PER_INCH),
+                float(self._path.s[-1]))
+        )
+        rows = self._hist[self._lags]
         reading = plant.read_policy(
-            float(self._prev_action[0]),
-            float(self._prev_action[1]),
-            float(self._prev_action[2]),
-            float(ahead["phi"]),
-            self._velocity_heading(state),
-            float(ahead["kappa"]),
-            float(ahead["dk"]),
+            rows[:, 0].tolist(),
+            rows[:, 1].tolist(),
+            rows[:, 2].tolist(),
+            rows[:, 3].tolist(),
+            rows[:, 4].tolist(),
+            look_x,
+            look_y,
+            float(near["phi"]),
+            float(state.theta),
             float(self.thrust_at(self._steps * _DT)),
             float(self._proj["cross"]),
         )
-        return np.asarray(reading.features, dtype=np.float32)
+        return {
+            "obs": np.asarray(reading.features, dtype=np.float32),
+            "priv": self._privileged(state),
+        }
 
 
 # The trainer and the viewer imported this name when the task was a pose.

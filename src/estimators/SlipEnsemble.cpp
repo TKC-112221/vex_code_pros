@@ -132,7 +132,7 @@ void SlipEnsemble::sampleCharacteristics() {
 }
 
 void SlipEnsemble::reset() {
-    reset(Pose2d{});
+    reset(Pose2d{Robot::Range::CENTER_X_M, Robot::Range::CENTER_Y_M, 0.0});
 }
 
 void SlipEnsemble::reset(const Pose2d& pose) {
@@ -154,9 +154,7 @@ void SlipEnsemble::setUniformWeights() {
 }
 
 void SlipEnsemble::clampParticle(Particle& p) const {
-    const double lim = Robot::Range::FIELD_HALF_M - 0.18;
-    p.x = mathutil::clamp_val(p.x, -lim, lim);
-    p.y = mathutil::clamp_val(p.y, -lim, lim);
+    Robot::clampFieldMeters(p.x, p.y, 0.18);
     p.theta = mathutil::normalize_angle(p.theta);
 }
 

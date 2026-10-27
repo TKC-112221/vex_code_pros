@@ -68,6 +68,13 @@ float NeuralNetwork::activate(float x) const {
         case Activation::TANH:       return std::tanh(x);
         case Activation::RELU:       return (x > 0.0f) ? x : 0.0f;
         case Activation::LEAKY_RELU: return (x > 0.0f) ? x : leaky_slope_ * x;
+        case Activation::SILU:
+            // x * sigmoid(x). The split form stays finite for large |x|.
+            if (x >= 0.0f) return x / (1.0f + std::exp(-x));
+            {
+                const float e = std::exp(x);
+                return x * e / (1.0f + e);
+            }
         case Activation::IDENTITY:   return x;
     }
     return x;

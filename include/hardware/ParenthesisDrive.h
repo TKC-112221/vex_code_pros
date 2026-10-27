@@ -37,4 +37,5 @@ private:
     pros::Motor* side_l_;
     pros::Motor* side_r_;
     double prev_sl_ = 0, prev_sr_ = 0;
+    bool have_sl_ = false, have_sr_ = false;
 };

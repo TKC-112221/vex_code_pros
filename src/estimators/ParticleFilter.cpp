@@ -39,7 +39,7 @@ ParticleFilter::ParticleFilter(const ParticleFilterConfig& cfg) : cfg_(cfg) {
 }
 
 void ParticleFilter::reset() {
-    reset(Pose2d{});
+    reset(Pose2d{Robot::Range::CENTER_X_M, Robot::Range::CENTER_Y_M, 0.0});
 }
 
 void ParticleFilter::reset(const Pose2d& pose) {
@@ -149,7 +149,10 @@ void ParticleFilter::correctRanges(const DistanceReading* distance, int count) {
     // loop does not cast.
     const float c = std::cos(static_cast<float>(pose_.theta));
     const float s = std::sin(static_cast<float>(pose_.theta));
-    const float H = static_cast<float>(Robot::Range::FIELD_HALF_M);
+    const float x_lo = static_cast<float>(Robot::Range::FIELD_X_MIN_M);
+    const float x_hi = static_cast<float>(Robot::Range::FIELD_X_MAX_M);
+    const float y_lo = static_cast<float>(Robot::Range::FIELD_Y_MIN_M);
+    const float y_hi = static_cast<float>(Robot::Range::FIELD_Y_MAX_M);
     const float ox0 = static_cast<float>(pose_.x);
     const float oy0 = static_cast<float>(pose_.y);
     constexpr float kDirMin = 1.0e-3f;
@@ -183,10 +186,10 @@ void ParticleFilter::correctRanges(const DistanceReading* distance, int count) {
         float ty = kMiss;
         float wall_x = 0.0f;
         float wall_y = 0.0f;
-        if (dx > kDirMin) { wall_x = H; tx = (H - (ox0 + rx)) / dx; }
-        else if (dx < -kDirMin) { wall_x = -H; tx = (-H - (ox0 + rx)) / dx; }
-        if (dy > kDirMin) { wall_y = H; ty = (H - (oy0 + ry)) / dy; }
-        else if (dy < -kDirMin) { wall_y = -H; ty = (-H - (oy0 + ry)) / dy; }
+        if (dx > kDirMin) { wall_x = x_hi; tx = (x_hi - (ox0 + rx)) / dx; }
+        else if (dx < -kDirMin) { wall_x = x_lo; tx = (x_lo - (ox0 + rx)) / dx; }
+        if (dy > kDirMin) { wall_y = y_hi; ty = (y_hi - (oy0 + ry)) / dy; }
+        else if (dy < -kDirMin) { wall_y = y_lo; ty = (y_lo - (oy0 + ry)) / dy; }
         const bool x_ok = tx > 0.0f && tx < kMiss;
         const bool y_ok = ty > 0.0f && ty < kMiss;
         if (!x_ok && !y_ok) continue;
