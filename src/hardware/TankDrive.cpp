@@ -11,8 +11,10 @@
  *   - motor reversal is encoded by negating the port at construction
  * ------------------------------------------------------------------------- */
 #include "hardware/TankDrive.h"
+#include "hardware/ChassisVoltage.h"
 #include "hardware/DeviceRead.h"
 #include "hardware/DifferentialMix.h"
+#include "logic/CascadeLift.h"
 #include "config/Ports.h"
 #include "config/Settings.h"
 #include "core/Specs.h"
@@ -20,6 +22,7 @@
 #include "math/MathUtils.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 using mathutil::clamp_val;
 using mathutil::sign;
@@ -61,8 +64,16 @@ void TankDrive::initialize() {
     // while a command is applied. SUB1/SUB2 stay free.
     main1->set_brake_mode(pros::MotorBrake::hold);
     main2->set_brake_mode(pros::MotorBrake::hold);
+    // Height 0 is the cascade position at startup.
+    cascadeLift().zero(readCascade());
     sub1->set_brake_mode(pros::MotorBrake::coast);
     sub2->set_brake_mode(pros::MotorBrake::coast);
+    ranges_.probe();
+    std::printf("subsys: init MAIN1 port %u (const %d) MAIN2 port %u (const %d) "
+                "SUB1 port %u SUB2 port %u\n",
+                main1->get_port(), Ports::MAIN1, main2->get_port(), Ports::MAIN2,
+                sub1->get_port(), sub2->get_port());
+    std::fflush(stdout);
 }
 
 void TankDrive::beginSensorCalibration() {
@@ -88,6 +99,9 @@ void TankDrive::calibrateSensors() {
 void TankDrive::stop() {
     left_drive->move_voltage(0);
     right_drive->move_voltage(0);
+    volt_surge_ = 0.0;
+    volt_yaw_ = 0.0;
+    volt_primed_ = false;
 }
 
 JoystickData TankDrive::readJoystick() {
@@ -202,9 +216,18 @@ void TankDrive::applyCurrentLimit(double& left_v, double& right_v, double v_lin,
 ChassisCommand TankDrive::applyDrive(const ChassisCommand& cmd, const ChassisObservation& obs) {
     namespace CT = Settings::ControlToggles;
 
-    // Inverse kinematics: chassis effort -> per-bank voltage.
-    double left_v  = cmd.linear - cmd.angular;
-    double right_v = cmd.linear + cmd.angular;
+    ChassisVoltageState held;
+    held.v = volt_surge_;
+    held.w = volt_yaw_;
+    held.primed = volt_primed_;
+    const ChassisCommand volts = chassisVoltage(cmd, obs, feedforward_, held);
+    volt_surge_ = held.v;
+    volt_yaw_ = held.w;
+    volt_primed_ = held.primed;
+
+    // Inverse kinematics: chassis volts -> per-bank voltage.
+    double left_v  = volts.linear - volts.angular;
+    double right_v = volts.linear + volts.angular;
 
     // Stick-zero brake: gently oppose residual motion when the sticks are idle.
     if (CT::STICK_ZERO_BRAKE) {
@@ -250,11 +273,40 @@ CascadeReading TankDrive::readCascade() const {
 }
 
 void TankDrive::applySubsystems(const SubsystemCommand& sub) {
-    const MainPairPct pair = mixMainPair(sub.cascade_pct, sub.intake_pct);
-    main1->move_voltage(devread::pctToMv(pair.main1_pct));
-    main2->move_voltage(devread::pctToMv(pair.main2_pct));
-    sub1->move_voltage(0);
-    sub2->move_voltage(0);
-    pneumatics_g->set_value(sub.pneumatics_g_state);
-    pneumatics_b->set_value(sub.pneumatics_b_state);
+    SubsystemCommand cmd = sub;
+    cascadeLift().writePercent(cmd, readCascade());
+    const MainPairPct pair = mixMainPair(cmd.cascade_pct, cmd.intake_pct);
+    const std::int32_t m1_mv = devread::pctToMv(pair.main1_pct);
+    const std::int32_t m2_mv = devread::pctToMv(pair.main2_pct);
+    const std::int32_t m1_rc = main1->move_voltage(m1_mv);
+    const std::int32_t m2_rc = main2->move_voltage(m2_mv);
+    const std::int32_t s1_rc = sub1->move_voltage(0);
+    const std::int32_t s2_rc = sub2->move_voltage(0);
+    pneumatics_g->set_value(cmd.pneumatics_g_state);
+    pneumatics_b->set_value(cmd.pneumatics_b_state);
+
+    // Change-only, plus a line every 500 ms while a shoulder command is live.
+    // rc is 1 on success and PROS_ERR (2147483647) when the port is not a motor.
+    static int prev_cascade = 0, prev_intake = 0, prev_height = 0;
+    static std::uint32_t prev_ms = 0;
+    const std::uint32_t now = pros::millis();
+    const int height_flag = sub.cascade_height ? 1 : 0;
+    const bool changed = sub.cascade_pct != prev_cascade || sub.intake_pct != prev_intake
+                      || height_flag != prev_height;
+    const bool live = cmd.cascade_pct != 0 || cmd.intake_pct != 0 || sub.cascade_height;
+    if (changed || (live && now - prev_ms >= 500)) {
+        prev_cascade = sub.cascade_pct;
+        prev_intake = sub.intake_pct;
+        prev_height = height_flag;
+        prev_ms = now;
+        std::printf("subsys: cascade %d (req %d h=%d tgt=%.1f) intake %d -> "
+                    "M1 p%u %d%% %ldmV rc=%ld | M2 p%u %d%% %ldmV rc=%ld | "
+                    "S1 rc=%ld S2 rc=%ld\n",
+                    cmd.cascade_pct, sub.cascade_pct, height_flag, sub.cascade_target_in,
+                    cmd.intake_pct,
+                    main1->get_port(), pair.main1_pct, static_cast<long>(m1_mv), static_cast<long>(m1_rc),
+                    main2->get_port(), pair.main2_pct, static_cast<long>(m2_mv), static_cast<long>(m2_rc),
+                    static_cast<long>(s1_rc), static_cast<long>(s2_rc));
+        std::fflush(stdout);
+    }
 }

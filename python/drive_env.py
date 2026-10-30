@@ -60,7 +60,8 @@ def _wrap_angle(angle):
 
 
 _DT = float(plant.DT_SEC)
-_MAX_VOLTS = float(plant.MAX_VOLTS)
+_MAX_VEL_LIN = float(plant.MAX_VEL_LIN)
+_MAX_VEL_ANG = float(plant.MAX_VEL_ANG)
 
 # Ordered easy to hard. Training stays on a stage until the path is finished.
 STAGES = P.STAGES
@@ -140,8 +141,8 @@ def _append(samples, state, length, d2, straight):
         k_avg = 0.5 * (kappa + k_next)
         theta_next = theta + k_avg * step
         mid = theta + 0.5 * (theta_next - theta)
-        x_next = x + np.cos(mid) * step
-        y_next = y + np.sin(mid) * step
+        x_next = x + (-np.sin(mid)) * step
+        y_next = y + np.cos(mid) * step
         samples.append((s, x, y, theta, 0.0 if straight else kappa, d2_i))
         kappa = 0.0 if straight else k_next
         theta = theta if straight else theta_next
@@ -294,21 +295,21 @@ _DUBINS_KIND = {
 def _segment_pose(x, y, theta, amount, kind, radius):
     if kind == "L":
         return (
-            x + radius * (np.sin(theta + amount) - np.sin(theta)),
-            y + radius * (-np.cos(theta + amount) + np.cos(theta)),
+            x + radius * (np.cos(theta + amount) - np.cos(theta)),
+            y + radius * (np.sin(theta + amount) - np.sin(theta)),
             theta + amount,
             P.K_MAX,
         )
     if kind == "R":
         return (
-            x + radius * (-np.sin(theta - amount) + np.sin(theta)),
-            y + radius * (np.cos(theta - amount) - np.cos(theta)),
+            x + radius * (np.cos(theta) - np.cos(theta - amount)),
+            y + radius * (np.sin(theta) - np.sin(theta - amount)),
             theta - amount,
             -P.K_MAX,
         )
     return (
-        x + radius * amount * np.cos(theta),
-        y + radius * amount * np.sin(theta),
+        x + radius * amount * (-np.sin(theta)),
+        y + radius * amount * np.cos(theta),
         theta,
         0.0,
     )
@@ -547,8 +548,8 @@ class PathFollowEnv(gym.Env):
 
         phi = float(self._path.theta[0])
         offset = float(self.np_random.uniform(-P.START_OFFSET_IN, P.START_OFFSET_IN))
-        x = float(self._path.x[0] - np.sin(phi) * offset)
-        y = float(self._path.y[0] + np.cos(phi) * offset)
+        x = float(self._path.x[0] - np.cos(phi) * offset)
+        y = float(self._path.y[0] - np.sin(phi) * offset)
         self._theta = phi + float(self.np_random.uniform(-P.START_HEADING_RAD, P.START_HEADING_RAD))
         self.plant.reset(x, y, self._theta, 0.0, 0.0, 0.0)
         state = self.plant.state()
@@ -566,13 +567,13 @@ class PathFollowEnv(gym.Env):
         # The schedule the policy just saw. Scoring the later clock time
         # would charge a copy of that schedule for the step just taken.
         target = self.thrust_at(self._steps * _DT)
-        surge = float(command[0]) * _MAX_VOLTS
-        yaw = float(command[1]) * _MAX_VOLTS if command.size > 1 else 0.0
+        surge = float(command[0]) * _MAX_VEL_LIN
+        yaw = float(command[1]) * _MAX_VEL_ANG if command.size > 1 else 0.0
         self._prev_action[:] = 0.0
         self._prev_action[0] = float(command[0])
         if command.size > 1 and self._prev_action.size > 1:
             self._prev_action[1] = float(command[1])
-        self.plant.step(surge, 0.0, yaw)
+        self.plant.step_velocity(surge, 0.0, yaw)
         state = self.plant.state()
         self._theta = float(state.theta)
         proj = self._project(state.x_in, state.y_in)
@@ -680,7 +681,7 @@ class PathFollowEnv(gym.Env):
         phi = mix(path.theta)
         dx = float(x) - best_cx
         dy = float(y) - best_cy
-        cross = -np.sin(phi) * dx + np.cos(phi) * dy
+        cross = -np.cos(phi) * dx - np.sin(phi) * dy
         return {
             "s": mix(path.s),
             "phi": phi,
@@ -718,8 +719,8 @@ class PathFollowEnv(gym.Env):
 
     def _lookahead(self, state):
         theta = float(state.theta)
-        c = float(np.cos(theta))
-        s = float(np.sin(theta))
+        c = float(-np.sin(theta))
+        s = float(np.cos(theta))
         inch = float(plant.METERS_PER_INCH)
         s_end = float(self._path.s[-1])
         xs = []
@@ -742,8 +743,8 @@ class PathFollowEnv(gym.Env):
         values = (
             float(state.x_in) / half,
             (float(state.y_in) - center_y) / half,
-            float(np.sin(state.theta)),
             float(np.cos(state.theta)),
+            float(-np.sin(state.theta)),
             float(state.v_lin) / lin,
             float(state.v_lat) / lin,
             float(state.v_ang) / ang,

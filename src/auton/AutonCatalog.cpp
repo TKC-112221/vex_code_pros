@@ -1,11 +1,13 @@
 /* ---------------------------------------------------------------------------
- * AutonCatalog.cpp  --  names, start poses, and builders for each side.
+ * AutonCatalog.cpp  --  names and builders for each side.
  *
- * The field drawing samples a built routine from the row's start pose.
- * Changing the highlighted row does not move the robot. Controller Y and
- * competition autonomous() build the highlighted row with the live model.
- * The plant module defines PLANT_MODULE and has no PROS kernel, so its
- * copy of this lock is a standard mutex.
+ * The field drawing samples a built routine from that routine's startAt()
+ * pose. A match routine is mirrored when blue is selected. Changing the
+ * highlighted row does not move the robot. Controller Y and competition
+ * autonomous() build the highlighted row with the live model, and a routine
+ * that named a start is placed there before it runs. The plant module
+ * defines PLANT_MODULE and has no PROS kernel, so its copy of this lock is
+ * a standard mutex.
  * ------------------------------------------------------------------------- */
 
 #include "auton/AutonCatalog.h"
@@ -25,40 +27,30 @@ using Builder = auton::Routine (*)(const IFeedForward*);
 
 struct Entry {
     const char* name;
-    Pose2d start;
     Builder build;
 };
 
-Pose2d startAt(double x_in, double y_in, double heading_deg) {
-    return Pose2d{x_in, y_in, heading_deg * (Robot::PI / 180.0)};
-}
-
-const Entry kRed[] = {
-    {"Low side",  startAt(56, 20, 90),   auton::buildRedLow},
-    {"High side", startAt(56, 124, 180), auton::buildRedHigh},
-    {"Center",    startAt(40, 18, 90),   auton::buildRedCenter},
+const Entry kMatch[] = {
+    {"Left side",  auton::buildLeftSide2},
+    {"Right side", auton::buildRightSide2},
 };
 
-const Entry kBlue[] = {
-    {"Low side",  startAt(-56, 20, 90),  auton::buildBlueLow},
-    {"High side", startAt(-56, 124, 0),  auton::buildBlueHigh},
-    {"Center",    startAt(-40, 18, 90),  auton::buildBlueCenter},
-};
-
-// Skills begins at the field center, facing +X, which is where calibration
-// leaves the simulated robot.
 const Entry kSkills[] = {
-    {"Skills", startAt(0, Robot::Range::CENTER_Y_IN, 0), auton::buildSkillsRoutine},
+    {"Skills", auton::buildSkillsRoutine},
 };
+
+// A routine that omits startAt() is drawn from the field center, the pose
+// calibration leaves the simulated robot in.
+Pose2d drawingOrigin(const auton::Routine& route) {
+    if (route.hasStart()) return route.startPose();
+    return Pose2d{0.0, Robot::Range::CENTER_Y_IN, 0.0};
+}
 
 const Entry* entries(auton::AutonSide side, int& count) {
     switch (side) {
-        case auton::AutonSide::Red:
-            count = (int)(sizeof(kRed) / sizeof(kRed[0]));
-            return kRed;
-        case auton::AutonSide::Blue:
-            count = (int)(sizeof(kBlue) / sizeof(kBlue[0]));
-            return kBlue;
+        case auton::AutonSide::Match:
+            count = (int)(sizeof(kMatch) / sizeof(kMatch[0]));
+            return kMatch;
         case auton::AutonSide::Skills:
             count = (int)(sizeof(kSkills) / sizeof(kSkills[0]));
             return kSkills;
@@ -69,8 +61,14 @@ const Entry* entries(auton::AutonSide side, int& count) {
 
 int sideSlot(auton::AutonSide side) {
     const int slot = static_cast<int>(side);
-    if (slot < 0 || slot > 2) return 2;
+    if (slot < 0 || slot > 1) return 1;
     return slot;
+}
+
+// Match routes are written on the red side. Blue is that route reflected
+// across the field centerline. Skills stays where it was written.
+bool mirrorRoute(auton::AutonSide side, auton::Alliance color) {
+    return side == auton::AutonSide::Match && color == auton::Alliance::Blue;
 }
 
 #if defined(PLANT_MODULE)
@@ -79,7 +77,8 @@ std::mutex g_mu;
 pros::Mutex g_mu;
 #endif
 auton::AutonSide g_side = auton::AutonSide::Skills;
-int g_index[3] = {0, 0, 0};
+auton::Alliance g_alliance = auton::Alliance::Red;
+int g_index[2] = {0, 0};
 
 class Lock {
 public:
@@ -115,9 +114,16 @@ namespace auton {
 
 const char* autonSideName(AutonSide side) {
     switch (side) {
-        case AutonSide::Red: return "Red auto";
-        case AutonSide::Blue: return "Blue auto";
+        case AutonSide::Match: return "Match";
         case AutonSide::Skills: return "Skills";
+    }
+    return "";
+}
+
+const char* allianceName(Alliance color) {
+    switch (color) {
+        case Alliance::Red: return "Red";
+        case Alliance::Blue: return "Blue";
     }
     return "";
 }
@@ -137,7 +143,7 @@ const char* autonName(AutonSide side, int index) {
 
 AutonSelection currentSelection() {
     const Lock lock(g_mu);
-    return AutonSelection{g_side, g_index[sideSlot(g_side)]};
+    return AutonSelection{g_side, g_index[sideSlot(g_side)], g_alliance};
 }
 
 void selectSide(AutonSide side) {
@@ -152,38 +158,55 @@ void selectIndex(int index) {
     clampIndex(g_side);
 }
 
-std::unique_ptr<Command> buildSelected(const IFeedForward* model) {
+void selectAlliance(Alliance color) {
+    const Lock lock(g_mu);
+    g_alliance = color;
+}
+
+BuiltAuton buildSelected(const IFeedForward* model) {
     Builder build = nullptr;
+    AutonSide side = AutonSide::Skills;
+    Alliance color = Alliance::Red;
     {
         const Lock lock(g_mu);
         int n = 0;
         const Entry* table = entries(g_side, n);
         const int index = g_index[sideSlot(g_side)];
         if (table != nullptr && index >= 0 && index < n) build = table[index].build;
+        side = g_side;
+        color = g_alliance;
     }
-    if (build == nullptr) return nullptr;
-    return build(model).build();
+    BuiltAuton out;
+    if (build == nullptr) return out;
+    Routine route = build(model);
+    if (mirrorRoute(side, color)) route.mirror();
+    out.has_start = route.hasStart();
+    if (out.has_start) out.start = route.startPose();
+    out.command = route.build();
+    return out;
 }
 
 int previewSelected(Pose2d* out, int cap) {
     if (out == nullptr || cap < 2) return 0;
-    Entry chosen{};
-    bool ok = false;
+    Builder build = nullptr;
+    AutonSide side = AutonSide::Skills;
+    Alliance color = Alliance::Red;
     {
         const Lock lock(g_mu);
         int n = 0;
         const Entry* table = entries(g_side, n);
         const int index = g_index[sideSlot(g_side)];
-        if (table != nullptr && index >= 0 && index < n && table[index].build != nullptr) {
-            chosen = table[index];
-            ok = true;
-        }
+        if (table != nullptr && index >= 0 && index < n) build = table[index].build;
+        side = g_side;
+        color = g_alliance;
     }
-    if (!ok) return 0;
-    std::unique_ptr<Command> route = chosen.build(nullptr).build();
-    if (!route) return 0;
-    Pose2d from = chosen.start;
-    return route->appendRoute(from, out, 0, cap);
+    if (build == nullptr) return 0;
+    Routine route = build(nullptr);
+    if (mirrorRoute(side, color)) route.mirror();
+    std::unique_ptr<Command> command = route.build();
+    if (!command) return 0;
+    Pose2d from = drawingOrigin(route);
+    return command->appendRoute(from, out, 0, cap);
 }
 
 } // namespace auton

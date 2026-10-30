@@ -96,7 +96,9 @@ double filterChannel(ScalarKalman& channel, double sample, double predicted_delt
 // y left; a beam's range falls as its mount moves along the beam. The mount
 // lever arm is included so an offset perpendicular to the beam moves with yaw.
 double rangeDelta(int index, double forward_delta, double strafe_delta, double v_ang) {
-    const Robot::Range::Mount& mount = Robot::Range::MOUNT[index];
+    // Travel is the geometric center. The sensor's lever is its tracking
+    // offset plus the half-length from that centre back to the wheels.
+    const Robot::Range::Mount mount = Robot::Range::centerOffset(index);
     const double dth = v_ang * System::DT_SEC;
     const double dx = forward_delta - dth * mount.y;
     const double dy = strafe_delta + dth * mount.x;

@@ -6,6 +6,7 @@
 #include "core/Specs.h"
 #include "core/Tuning.h"
 #include "math/MathUtils.h"
+#include "math/TrackingCenter.h"
 #include <cmath>
 
 namespace {
@@ -39,7 +40,7 @@ ParticleFilter::ParticleFilter(const ParticleFilterConfig& cfg) : cfg_(cfg) {
 }
 
 void ParticleFilter::reset() {
-    reset(Pose2d{Robot::Range::CENTER_X_M, Robot::Range::CENTER_Y_M, 0.0});
+    reset(tracking::origin());
 }
 
 void ParticleFilter::reset(const Pose2d& pose) {
@@ -108,17 +109,24 @@ void ParticleFilter::predict(double forward_m, double strafe_m, double d_theta_r
     // so each particle's own midpoint angle would change this step by a
     // fraction of a millimeter.
     const float mid = static_cast<float>(pose_.theta) + d_theta * 0.5f;
-    const float c = std::cos(mid);
-    const float s = std::sin(mid);
 
     for (int i = 0; i < cfg_.count; ++i) {
         Particle& p = particles_[i];
         const float nf = forward + ((sig_f > 0.0f) ? normal() * sig_f : 0.0f);
         const float ns = strafe + ((sig_s > 0.0f) ? normal() * sig_s : 0.0f);
         const float nd = d_theta + ((sig_r > 0.0f) ? normal() * sig_r : 0.0f);
-        p.x += nf * c - ns * s;
-        p.y += nf * s + ns * c;
-        p.theta = wrapAngle(p.theta + nd);
+        // Deltas are the geometric center. The particle is the front middle,
+        // so a turn swings it about that center.
+        double x = static_cast<double>(p.x);
+        double y = static_cast<double>(p.y);
+        const double th0 = static_cast<double>(p.theta);
+        const double ndd = static_cast<double>(nd);
+        tracking::integrate(x, y, th0, th0 + ndd,
+                            static_cast<double>(nf), static_cast<double>(ns),
+                            static_cast<double>(mid));
+        p.x = static_cast<float>(x);
+        p.y = static_cast<float>(y);
+        p.theta = wrapAngle(static_cast<float>(th0 + ndd));
     }
     recomputeEstimate();
 }
@@ -147,8 +155,8 @@ void ParticleFilter::correctRanges(const DistanceReading* distance, int count) {
     // beam is a wall plane: range = cx * x + cy * y + c0. That is the ray
     // to an axis-aligned wall with the direction fixed, so the per-particle
     // loop does not cast.
-    const float c = std::cos(static_cast<float>(pose_.theta));
-    const float s = std::sin(static_cast<float>(pose_.theta));
+    const float c = mathutil::heading_cos(static_cast<float>(pose_.theta));
+    const float s = mathutil::heading_sin(static_cast<float>(pose_.theta));
     const float x_lo = static_cast<float>(Robot::Range::FIELD_X_MIN_M);
     const float x_hi = static_cast<float>(Robot::Range::FIELD_X_MAX_M);
     const float y_lo = static_cast<float>(Robot::Range::FIELD_Y_MIN_M);
@@ -170,9 +178,10 @@ void ParticleFilter::correctRanges(const DistanceReading* distance, int count) {
     int nvalid = 0;
     for (int i = 0; i < count; ++i) {
         if (!distance[i].valid) continue;
-        const Robot::Range::Mount& mount = Robot::Range::MOUNT[i];
+        const Robot::Range::Mount mount = Robot::Range::TRACKING_OFFSET[i];
         const float z = static_cast<float>(distance[i].range_m);
         const float sigma = static_cast<float>(Robot::rangeSigmaM(distance[i].range_m, distance[i].confidence));
+        // Particles store the tracking centre. The offset is already from there.
         const float mx = static_cast<float>(mount.x);
         const float my = static_cast<float>(mount.y);
         const float yaw_c = std::cos(static_cast<float>(mount.yaw));

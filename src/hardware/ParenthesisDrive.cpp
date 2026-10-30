@@ -5,6 +5,7 @@
  * side traction wheels and overrides the 6-wheel mix and the odometry source.
  * ------------------------------------------------------------------------- */
 #include "hardware/ParenthesisDrive.h"
+#include "hardware/ChassisVoltage.h"
 #include "hardware/DeviceRead.h"
 #include "config/Ports.h"
 #include "config/Settings.h"
@@ -80,17 +81,26 @@ ChassisObservation ParenthesisDrive::readObservation(double prev_heading_rad) {
     return o;
 }
 
-ChassisCommand ParenthesisDrive::applyDrive(const ChassisCommand& cmd, const ChassisObservation& /*obs*/) {
+ChassisCommand ParenthesisDrive::applyDrive(const ChassisCommand& cmd, const ChassisObservation& obs) {
+    ChassisVoltageState held;
+    held.v = volt_surge_;
+    held.w = volt_yaw_;
+    held.primed = volt_primed_;
+    const ChassisCommand volts = chassisVoltage(cmd, obs, nullptr, held);
+    volt_surge_ = held.v;
+    volt_yaw_ = held.w;
+    volt_primed_ = held.primed;
+
     // Inverse kinematics: four holonomic corners + a forward-only side pair.
     double corner[4] = {
-        cmd.linear - cmd.lateral - cmd.angular,   // FL
-        cmd.linear + cmd.lateral + cmd.angular,   // FR
-        cmd.linear + cmd.lateral - cmd.angular,   // BL
-        cmd.linear - cmd.lateral + cmd.angular    // BR
+        volts.linear - volts.lateral - volts.angular,   // FL
+        volts.linear + volts.lateral + volts.angular,   // FR
+        volts.linear + volts.lateral - volts.angular,   // BL
+        volts.linear - volts.lateral + volts.angular    // BR
     };
     double side[2] = {
-        cmd.linear - cmd.angular,                 // SideL (no lateral term)
-        cmd.linear + cmd.angular                  // SideR
+        volts.linear - volts.angular,                 // SideL (no lateral term)
+        volts.linear + volts.angular                  // SideR
     };
 
     double all[6] = { corner[0], corner[1], corner[2], corner[3], side[0], side[1] };
@@ -106,8 +116,9 @@ ChassisCommand ParenthesisDrive::applyDrive(const ChassisCommand& cmd, const Cha
     side_r_->move_voltage(voltsToMv(side[1] * scale * bscale));
 
     ChassisCommand applied;
-    applied.linear  = cmd.linear  * scale;
-    applied.lateral = cmd.lateral * scale;
-    applied.angular = cmd.angular * scale;
+    applied.linear  = volts.linear  * scale;
+    applied.lateral = volts.lateral * scale;
+    applied.angular = volts.angular * scale;
+    applied.request = DriveRequest::Volts;
     return applied;
 }

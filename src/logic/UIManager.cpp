@@ -63,7 +63,15 @@ void UIManager::flushControllerLine() {
         if (ctrl_known_[line] && std::strcmp(lines_[line], sent_[line]) == 0) continue;
 
         // Pad so a shorter string overwrites the previous characters.
+#if !defined(ROBOT_HOST)
+        std::printf("trace: controller line %d\n", line);
+        std::fflush(stdout);
+#endif
         ctrl_->print((std::uint8_t)line, 0, "%-19s", lines_[line]);
+#if !defined(ROBOT_HOST)
+        std::printf("trace: controller line %d done\n", line);
+        std::fflush(stdout);
+#endif
         std::snprintf(sent_[line], sizeof(sent_[line]), "%s", lines_[line]);
         ctrl_known_[line] = true;
         ctrl_paced_ = true;

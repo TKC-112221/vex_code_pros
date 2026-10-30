@@ -6,7 +6,9 @@
 #include "auton/AutonCatalog.h"
 #include "core/Specs.h"
 #include "field/FieldPoints.h"
+#include "hardware/MockDriveParams.h"
 #include "logic/GoalAligner.h"
+#include "math/MathUtils.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -14,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cwchar>
+#include <mutex>
 #include <vector>
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -26,6 +29,7 @@ constexpr int kDropH = 36;
 constexpr int kRowH = 34;
 constexpr int kWindowH = 980;
 constexpr int kMaxRows = 16;
+constexpr int kSideCount = 2;
 constexpr int kPreviewCap = 512;
 constexpr double kFieldIn = 12.0 * 12.0;
 constexpr double kBodyLengthIn = Robot::Chassis::BODY_LENGTH_M * kInchesPerMeter;
@@ -63,16 +67,18 @@ RECT g_list_rect{};
 RECT g_row_rect[kMaxRows]{};
 int g_row_index[kMaxRows]{};
 int g_row_n = 0;
-RECT g_menu_rect[3]{};
+RECT g_menu_rect[kSideCount]{};
+RECT g_color_rect[2]{};
 bool g_drop_open = false;
 int g_list_scroll = 0;
 int g_hover_row = -1;
 int g_hover_menu = -1;
+int g_hover_color = -1;
 bool g_hover_drop = false;
 
 Pose2d g_preview[kPreviewCap]{};
 int g_preview_n = 0;
-auton::AutonSide g_preview_side = auton::AutonSide::Skills;
+COLORREF g_preview_color = RGB(118, 184, 150);
 unsigned g_preview_key = 0xffffffffu;
 
 int g_intake_pct = 0;
@@ -161,9 +167,21 @@ void drawGoals(HDC mem, double cx, double cy, double scale) {
     HPEN dotPen = CreatePen(PS_SOLID, 1, RGB(20, 80, 100));
     HBRUSH dotBrush = CreateSolidBrush(RGB(20, 90, 110));
     HBRUSH hotBrush = CreateSolidBrush(RGB(0, 150, 140));
+    HPEN loaderPen = CreatePen(PS_SOLID, 1, RGB(140, 80, 20));
+    HBRUSH loaderBrush = CreateSolidBrush(RGB(170, 100, 30));
     const int n = static_cast<int>(Field::Point::Count);
     for (int i = 0; i < n; ++i) {
         const Field::Spot& spot = Field::kSpots[i];
+        if (Field::isLoader(spot)) {
+            POINT c = fieldToScreen(spot.x, spot.y, cx, cy, scale);
+            HGDIOBJ oldPen = SelectObject(mem, loaderPen);
+            HGDIOBJ oldBrush = SelectObject(mem, loaderBrush);
+            Ellipse(mem, c.x - 3, c.y - 3, c.x + 4, c.y + 4);
+            SelectObject(mem, oldBrush);
+            SelectObject(mem, oldPen);
+            drawLabel(mem, c.x + 6, c.y - 16, spot.name);
+            continue;
+        }
         if (!Field::isAlignGoal(spot)) continue;
         const bool hot = (i == active);
         drawRing(mem, spot.x, spot.y, spot.hitbox_in, cx, cy, scale, hot ? hotPen : hitPen);
@@ -176,6 +194,8 @@ void drawGoals(HDC mem, double cx, double cy, double scale) {
         SelectObject(mem, oldPen);
         drawLabel(mem, c.x + 6, c.y - 16, spot.name);
     }
+    DeleteObject(loaderBrush);
+    DeleteObject(loaderPen);
     DeleteObject(hotBrush);
     DeleteObject(dotBrush);
     DeleteObject(dotPen);
@@ -196,11 +216,12 @@ void drawCurve(HDC mem, HPEN pen, double cx, double cy, double scale) {
 
 void drawChassis(HDC mem, const Pose2d& pose, double cx, double cy, double scale,
                  HBRUSH fill, HPEN edge, HPEN nosePen) {
-    const double hl = kBodyLengthIn / 2.0;
+    // Pose is the middle of the front edge. The rectangle runs back from it.
+    const double length = kBodyLengthIn;
     const double hw = Robot::Chassis::TRACK_WIDTH_M * kInchesPerMeter / 2.0;
-    const double cth = std::cos(pose.theta);
-    const double sth = std::sin(pose.theta);
-    const double rx[4] = {hl, hl, -hl, -hl};
+    const double cth = mathutil::heading_cos(pose.theta);
+    const double sth = mathutil::heading_sin(pose.theta);
+    const double rx[4] = {0.0, 0.0, -length, -length};
     const double ry[4] = {hw, -hw, -hw, hw};
     POINT body[4];
     for (int i = 0; i < 4; ++i) {
@@ -213,8 +234,8 @@ void drawChassis(HDC mem, const Pose2d& pose, double cx, double cy, double scale
     Polygon(mem, body, 4);
     POINT nose0 = fieldToScreen(pose.x, pose.y, cx, cy, scale);
     const double nose_in = 0.06 * kInchesPerMeter;
-    POINT nose1 = fieldToScreen(pose.x + (hl + nose_in) * cth,
-                                pose.y + (hl + nose_in) * sth, cx, cy, scale);
+    POINT nose1 = fieldToScreen(pose.x + nose_in * cth,
+                                pose.y + nose_in * sth, cx, cy, scale);
     SelectObject(mem, nosePen);
     MoveToEx(mem, nose0.x, nose0.y, nullptr);
     LineTo(mem, nose1.x, nose1.y);
@@ -475,22 +496,22 @@ void drawSidePanel(HDC mem, int x, int y, int w, int h) {
     drawSubsystemPanel(mem, originX, mid + 12, innerW, y + h);
 }
 
-COLORREF sideColor(auton::AutonSide side) {
-    switch (side) {
-        case auton::AutonSide::Red: return RGB(214, 104, 96);
-        case auton::AutonSide::Blue: return RGB(96, 146, 214);
-        case auton::AutonSide::Skills: return RGB(118, 184, 150);
-    }
-    return RGB(180, 180, 180);
+COLORREF allianceColor(auton::Alliance color) {
+    return color == auton::Alliance::Blue ? RGB(96, 146, 214) : RGB(214, 104, 96);
 }
 
-COLORREF sideFill(auton::AutonSide side) {
-    switch (side) {
-        case auton::AutonSide::Red: return RGB(72, 34, 32);
-        case auton::AutonSide::Blue: return RGB(28, 44, 78);
-        case auton::AutonSide::Skills: return RGB(30, 52, 44);
-    }
-    return RGB(40, 42, 48);
+COLORREF allianceFill(auton::Alliance color) {
+    return color == auton::Alliance::Blue ? RGB(28, 44, 78) : RGB(72, 34, 32);
+}
+
+COLORREF sideColor(auton::AutonSide side, auton::Alliance color) {
+    if (side == auton::AutonSide::Skills) return RGB(118, 184, 150);
+    return allianceColor(color);
+}
+
+COLORREF sideFill(auton::AutonSide side, auton::Alliance color) {
+    if (side == auton::AutonSide::Skills) return RGB(30, 52, 44);
+    return allianceFill(color);
 }
 
 HFONT makeUiFont(int px, int weight) {
@@ -524,22 +545,24 @@ void clearAutonHits() {
     g_drop_rect = RECT{};
     g_list_rect = RECT{};
     g_row_n = 0;
-    for (int i = 0; i < 3; ++i) g_menu_rect[i] = RECT{};
+    for (int i = 0; i < kSideCount; ++i) g_menu_rect[i] = RECT{};
+    for (int i = 0; i < 2; ++i) g_color_rect[i] = RECT{};
 }
 
 void ensurePreview() {
     const auton::AutonSelection sel = auton::currentSelection();
-    const unsigned key = static_cast<unsigned>(sel.side) * 256u
-        + static_cast<unsigned>(sel.index);
+    const unsigned key = (static_cast<unsigned>(sel.side) << 16)
+        | (static_cast<unsigned>(sel.color) << 8)
+        | (static_cast<unsigned>(sel.index) & 0xffu);
     if (key == g_preview_key) return;
-    g_preview_side = sel.side;
+    g_preview_color = sideColor(sel.side, sel.color);
     g_preview_n = auton::previewSelected(g_preview, kPreviewCap);
     g_preview_key = key;
 }
 
 void drawPreview(HDC mem, double cx, double cy, double scale) {
     if (g_preview_n < 2) return;
-    const COLORREF color = sideColor(g_preview_side);
+    const COLORREF color = g_preview_color;
     HPEN pen = CreatePen(PS_SOLID, 2, color);
     HPEN edge = CreatePen(PS_SOLID, 1, color);
     HBRUSH dot = CreateSolidBrush(color);
@@ -586,7 +609,7 @@ void drawAutonPane(HDC mem, int x, int y, int w, int h) {
     const auton::AutonSelection sel = auton::currentSelection();
     const auton::AutonSide side = sel.side;
     const int count = auton::autonCount(side);
-    const COLORREF color = sideColor(side);
+    const COLORREF color = sideColor(side, sel.color);
 
     HFONT font = makeUiFont(15, FW_NORMAL);
     const bool ownFont = font != nullptr;
@@ -608,7 +631,12 @@ void drawAutonPane(HDC mem, int x, int y, int w, int h) {
     drawChevron(mem, g_drop_rect.right - 24, g_drop_rect.top + (kDropH - 6) / 2, g_drop_open);
     cursor += kDropH + 8;
 
-    int listBottom = y + h - pad;
+    const int toggleTop = y + h - pad - kDropH;
+    const int gap = 6;
+    const int half = (w - 2 * pad - gap) / 2;
+    g_color_rect[0] = RECT{x + pad, toggleTop, x + pad + half, toggleTop + kDropH};
+    g_color_rect[1] = RECT{g_color_rect[0].right + gap, toggleTop, x + w - pad, toggleTop + kDropH};
+    int listBottom = toggleTop - 8;
     if (listBottom < cursor + kRowH) listBottom = cursor + kRowH;
     g_list_rect = RECT{x + pad, cursor, x + w - pad, listBottom};
 
@@ -643,7 +671,7 @@ void drawAutonPane(HDC mem, int x, int y, int w, int h) {
         const bool hot = index == g_hover_row && !g_drop_open;
         if (on) {
             fillRoundRect(mem, row.left, row.top + 2, row.right, row.bottom - 2,
-                          8, sideFill(side), color);
+                          8, sideFill(side, sel.color), color);
         } else if (hot) {
             fillRoundRect(mem, row.left, row.top + 2, row.right, row.bottom - 2,
                           8, RGB(40, 44, 50), RGB(40, 44, 50));
@@ -657,12 +685,30 @@ void drawAutonPane(HDC mem, int x, int y, int w, int h) {
     }
     RestoreDC(mem, -1);
 
+    const auton::Alliance colors[2] = {auton::Alliance::Red, auton::Alliance::Blue};
+    for (int i = 0; i < 2; ++i) {
+        const RECT& chip = g_color_rect[i];
+        const bool on = sel.color == colors[i];
+        const bool hot = i == g_hover_color && !on;
+        const COLORREF fill = on ? allianceFill(colors[i])
+                                  : (hot ? RGB(48, 52, 58) : RGB(40, 44, 50));
+        const COLORREF edge = on ? allianceColor(colors[i])
+                                  : (hot ? RGB(90, 96, 104) : RGB(40, 44, 50));
+        fillRoundRect(mem, chip.left, chip.top, chip.right, chip.bottom, 8, fill, edge);
+        RECT text = chip;
+        text.left += 8;
+        text.right -= 8;
+        drawUiText(mem, text, auton::allianceName(colors[i]),
+                   on ? RGB(246, 246, 246) : allianceColor(colors[i]),
+                   DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
+
     if (g_drop_open) {
         const int menuTop = g_drop_rect.bottom + 4;
-        const int menuH = 3 * kRowH;
+        const int menuH = kSideCount * kRowH;
         fillRoundRect(mem, g_drop_rect.left, menuTop, g_drop_rect.right, menuTop + menuH,
                       8, RGB(36, 40, 46), RGB(78, 84, 94));
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < kSideCount; ++i) {
             RECT item{g_drop_rect.left + 4, menuTop + i * kRowH,
                       g_drop_rect.right - 4, menuTop + (i + 1) * kRowH};
             g_menu_rect[i] = item;
@@ -671,8 +717,8 @@ void drawAutonPane(HDC mem, int x, int y, int w, int h) {
             const bool hot = i == g_hover_menu;
             if (on || hot) {
                 fillRoundRect(mem, item.left, item.top + 2, item.right, item.bottom - 2,
-                              6, on ? sideFill(itemSide) : RGB(50, 54, 62),
-                              on ? sideColor(itemSide) : RGB(50, 54, 62));
+                              6, on ? sideFill(itemSide, sel.color) : RGB(50, 54, 62),
+                              on ? sideColor(itemSide, sel.color) : RGB(50, 54, 62));
             }
             RECT text = item;
             text.left += 12;
@@ -688,7 +734,7 @@ void drawAutonPane(HDC mem, int x, int y, int w, int h) {
 
 bool handleAutonClick(POINT p) {
     if (g_drop_open) {
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < kSideCount; ++i) {
             if (PtInRect(&g_menu_rect[i], p)) {
                 auton::selectSide(static_cast<auton::AutonSide>(i));
                 break;
@@ -700,6 +746,12 @@ bool handleAutonClick(POINT p) {
     if (PtInRect(&g_drop_rect, p)) {
         g_drop_open = true;
         return true;
+    }
+    for (int i = 0; i < 2; ++i) {
+        if (PtInRect(&g_color_rect[i], p)) {
+            auton::selectAlliance(static_cast<auton::Alliance>(i));
+            return true;
+        }
     }
     for (int i = 0; i < g_row_n; ++i) {
         if (PtInRect(&g_row_rect[i], p)) {
@@ -755,6 +807,437 @@ void drawRoutePreview(HDC mem, int x, int y, int w, int h) {
     DeleteObject(fieldBrush);
     drawGoals(mem, cx, cy, scale);
     drawPreview(mem, cx, cy, scale);
+}
+
+// Knobs a controller overfits. Off the compiled plant, a short lag or a late
+// voltage oscillates, a long lag or a low gain undershoots, and extra speed
+// or a long skid runs past the target. Side resistance is omitted: it changes
+// reported current and does not move the wheels.
+// Friction, velocity, and acceleration are split into forward and yaw. The
+// compiled tick is no friction and a scale of 1, which keeps the shared lag.
+constexpr int kKnobDelay = 0;
+constexpr int kKnobLag = 1;
+constexpr int kKnobSpeed = 2;
+constexpr int kKnobSkid = 3;
+constexpr int kKnobLinFriction = 4;
+constexpr int kKnobLinVel = 5;
+constexpr int kKnobLinAccel = 6;
+constexpr int kKnobAngFriction = 7;
+constexpr int kKnobAngVel = 8;
+constexpr int kKnobAngAccel = 9;
+constexpr int kKnobCount = 10;
+
+// Ports the domain test can unplug. Order matches the chips under the sliders.
+constexpr int kSensImu = 0;
+constexpr int kSensEncL = 1;
+constexpr int kSensEncR = 2;
+constexpr int kSensDist = 3;
+constexpr int kSensCount = kSensDist + kDistanceChannels;
+
+struct Knob {
+    const char* label;
+    const char* hint;
+    const char* unit;
+    double min;
+    double max;
+    double original;
+    double step;
+};
+
+constexpr Knob kKnobs[kKnobCount] = {
+    {"Voltage delay", "late volts oscillate a tuned loop", "ms",
+     0.0, 120.0, 0.0, 10.0},
+    {"Velocity lag", "short oscillates, long undershoots", "s",
+     0.02, 0.80, MockPlant::VELOCITY_TAU_SEC, 0.0},
+    {"Speed scale", "high runs past, low stops short", "x",
+     0.40, 1.80, MockPlant::SPEED_SCALE, 0.0},
+    {"Skid time", "long slides past the path", "s",
+     0.04, 1.50, MockPlant::SKID_TAU_SEC, 0.0},
+    {"Linear friction", "forward volts lost before it rolls", "V",
+     0.0, 3.0, 0.0, 0.1},
+    {"Linear velocity", "scales settled forward speed", "x",
+     0.25, 1.75, 1.0, 0.0},
+    {"Linear acceleration", "high oscillates, low lags the drive", "x",
+     0.25, 1.75, 1.0, 0.0},
+    {"Angular friction", "VR-VL volts lost before it yaws", "V",
+     0.0, 6.0, 0.0, 0.1},
+    {"Angular velocity", "scales settled yaw rate", "x",
+     0.25, 1.75, 1.0, 0.0},
+    {"Angular acceleration", "high oscillates, low lags the turn", "x",
+     0.25, 1.75, 1.0, 0.0},
+};
+
+double g_knob[kKnobCount] = {
+    kKnobs[kKnobDelay].original,
+    kKnobs[kKnobLag].original,
+    kKnobs[kKnobSpeed].original,
+    kKnobs[kKnobSkid].original,
+    kKnobs[kKnobLinFriction].original,
+    kKnobs[kKnobLinVel].original,
+    kKnobs[kKnobLinAccel].original,
+    kKnobs[kKnobAngFriction].original,
+    kKnobs[kKnobAngVel].original,
+    kKnobs[kKnobAngAccel].original,
+};
+// True while that port is unplugged. Connected is the compiled robot.
+bool g_sensor_off[kSensCount] = {};
+std::mutex g_plant_mu;
+
+constexpr int kHitNone = -1;
+constexpr int kHitDrop = 1;
+constexpr int kHitPanel = 2;
+constexpr int kHitAll = 3;
+constexpr int kHitTrack = 10;
+constexpr int kHitReset = 40;
+constexpr int kHitSensor = 60;
+
+RECT g_plant_drop{};
+RECT g_plant_panel{};
+RECT g_plant_track[kKnobCount]{};
+RECT g_plant_reset[kKnobCount]{};
+RECT g_plant_sensor[kSensCount]{};
+RECT g_plant_all{};
+bool g_plant_open = false;
+int g_plant_drag = -1;
+int g_plant_hover = kHitNone;
+
+double knobLo(const Knob& k) { return std::min(k.min, k.original); }
+double knobHi(const Knob& k) { return std::max(k.max, k.original); }
+
+double knobT(const Knob& k, double value) {
+    const double lo = knobLo(k);
+    const double hi = knobHi(k);
+    if (hi <= lo) return 0.0;
+    double t = (value - lo) / (hi - lo);
+    if (t < 0.0) t = 0.0;
+    if (t > 1.0) t = 1.0;
+    return t;
+}
+
+double snapKnob(const Knob& k, double value) {
+    const double lo = knobLo(k);
+    const double hi = knobHi(k);
+    if (value < lo) value = lo;
+    if (value > hi) value = hi;
+    if (k.step > 0.0) {
+        value = lo + std::round((value - lo) / k.step) * k.step;
+        if (value < lo) value = lo;
+        if (value > hi) value = hi;
+    }
+    return value;
+}
+
+bool knobShifted(int index, double value) {
+    return std::fabs(value - kKnobs[index].original) > 1e-4;
+}
+
+void formatKnob(int index, double value, char* buf, int n) {
+    const Knob& k = kKnobs[index];
+    if (k.step >= 1.0) std::snprintf(buf, n, "%.0f %s", value, k.unit);
+    else if (k.step >= 0.1) std::snprintf(buf, n, "%.1f %s", value, k.unit);
+    else std::snprintf(buf, n, "%.3f %s", value, k.unit);
+}
+
+bool rectLive(const RECT& r) {
+    return r.right > r.left && r.bottom > r.top;
+}
+
+void clearPlantHits() {
+    g_plant_panel = RECT{};
+    g_plant_all = RECT{};
+    for (int i = 0; i < kKnobCount; ++i) {
+        g_plant_track[i] = RECT{};
+        g_plant_reset[i] = RECT{};
+    }
+    for (int i = 0; i < kSensCount; ++i) g_plant_sensor[i] = RECT{};
+}
+
+int plantHit(POINT p) {
+    if (rectLive(g_plant_drop) && PtInRect(&g_plant_drop, p)) return kHitDrop;
+    if (!g_plant_open) return kHitNone;
+    for (int i = 0; i < kKnobCount; ++i) {
+        if (rectLive(g_plant_reset[i]) && PtInRect(&g_plant_reset[i], p)) return kHitReset + i;
+    }
+    if (rectLive(g_plant_all) && PtInRect(&g_plant_all, p)) return kHitAll;
+    for (int i = 0; i < kSensCount; ++i) {
+        if (rectLive(g_plant_sensor[i]) && PtInRect(&g_plant_sensor[i], p)) return kHitSensor + i;
+    }
+    for (int i = 0; i < kKnobCount; ++i) {
+        if (!rectLive(g_plant_track[i])) continue;
+        RECT hit = g_plant_track[i];
+        InflateRect(&hit, 0, 6);
+        if (PtInRect(&hit, p)) return kHitTrack + i;
+    }
+    if (rectLive(g_plant_panel) && PtInRect(&g_plant_panel, p)) return kHitPanel;
+    return kHitNone;
+}
+
+void setKnobFromX(int index, int x) {
+    const Knob& k = kKnobs[index];
+    const RECT& track = g_plant_track[index];
+    const int span = track.right - track.left;
+    if (span <= 1) return;
+    double t = (double)(x - track.left) / (double)span;
+    if (t < 0.0) t = 0.0;
+    if (t > 1.0) t = 1.0;
+    const double lo = knobLo(k);
+    const double hi = knobHi(k);
+    double value = lo + t * (hi - lo);
+    if (std::fabs(value - k.original) <= 0.012 * (hi - lo)) value = k.original;
+    else value = snapKnob(k, value);
+    std::lock_guard<std::mutex> guard(g_plant_mu);
+    g_knob[index] = value;
+}
+
+void resetKnob(int index) {
+    std::lock_guard<std::mutex> guard(g_plant_mu);
+    g_knob[index] = kKnobs[index].original;
+}
+
+void resetPlantKnobs() {
+    std::lock_guard<std::mutex> guard(g_plant_mu);
+    for (int i = 0; i < kKnobCount; ++i) g_knob[i] = kKnobs[i].original;
+    for (int i = 0; i < kSensCount; ++i) g_sensor_off[i] = false;
+}
+
+static_assert(kSensCount == 7, "sensor chips");
+const char* kSensLabel[kSensCount] = {
+    "IMU", "L enc", "R enc", "Front", "Right", "Rear", "Left",
+};
+const int kSensWidth[kSensCount] = { 52, 62, 62, 58, 58, 54, 52 };
+
+void drawSensorChip(HDC mem, const RECT& chip, const char* text, bool off, bool hot) {
+    const COLORREF fill = off ? (hot ? RGB(120, 72, 32) : RGB(92, 58, 28))
+                              : (hot ? RGB(48, 62, 72) : RGB(36, 40, 46));
+    const COLORREF edge = off ? RGB(214, 148, 64) : RGB(90, 148, 168);
+    const COLORREF ink = off ? RGB(255, 220, 180) : RGB(220, 226, 232);
+    fillRoundRect(mem, chip.left, chip.top, chip.right, chip.bottom, 8, fill, edge);
+    drawUiText(mem, chip, text, ink, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+}
+
+void drawResetChip(HDC mem, const RECT& chip, const char* text, bool hot, bool idle) {
+    const COLORREF fill = idle ? RGB(40, 44, 50) : (hot ? RGB(92, 64, 36) : RGB(64, 48, 32));
+    const COLORREF edge = idle ? RGB(70, 74, 80) : RGB(214, 148, 64);
+    const COLORREF ink = idle ? RGB(160, 164, 170) : RGB(255, 228, 196);
+    fillRoundRect(mem, chip.left, chip.top, chip.right, chip.bottom, 8, fill, edge);
+    drawUiText(mem, chip, text, ink, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+}
+
+void drawPlantPanel(HDC mem, int fieldX, int fieldW) {
+    clearPlantHits();
+    if (fieldW < 160) {
+        g_plant_drop = RECT{};
+        return;
+    }
+
+    double shown[kKnobCount];
+    bool sensor_off[kSensCount];
+    {
+        std::lock_guard<std::mutex> guard(g_plant_mu);
+        for (int i = 0; i < kKnobCount; ++i) shown[i] = g_knob[i];
+        for (int i = 0; i < kSensCount; ++i) sensor_off[i] = g_sensor_off[i];
+    }
+    bool any = false;
+    for (int i = 0; i < kKnobCount; ++i) any = any || knobShifted(i, shown[i]);
+    for (int i = 0; i < kSensCount; ++i) any = any || sensor_off[i];
+
+    HFONT font = makeUiFont(14, FW_NORMAL);
+    HFONT hintFont = makeUiFont(12, FW_NORMAL);
+    const bool ownFont = font != nullptr;
+    const bool ownHint = hintFont != nullptr;
+    if (!ownFont) font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    if (!ownHint) hintFont = font;
+    HGDIOBJ oldFont = SelectObject(mem, font);
+    SetBkMode(mem, TRANSPARENT);
+
+    const int btnW = 168;
+    const int btnH = 28;
+    int btnRight = fieldX + fieldW - 12;
+    int btnLeft = btnRight - btnW;
+    if (btnLeft < fieldX + 8) btnLeft = fieldX + 8;
+    const int btnTop = 70;
+    g_plant_drop = RECT{btnLeft, btnTop, btnLeft + btnW, btnTop + btnH};
+    if (g_plant_drop.right > fieldX + fieldW - 8) g_plant_drop.right = fieldX + fieldW - 8;
+
+    if (g_plant_open) {
+        const int panelW = std::min(460, fieldW - 16);
+        int panelRight = g_plant_drop.right;
+        int panelLeft = panelRight - panelW;
+        if (panelLeft < fieldX + 8) panelLeft = fieldX + 8;
+        const int pad = 12;
+        const int left = panelLeft + pad;
+        const int right = panelRight - pad;
+        int cursor = g_plant_drop.bottom + 6 + pad;
+
+        RECT caption{left, cursor, right, cursor + 36};
+        cursor = caption.bottom + 8;
+
+        // Shared plant on the left. Forward and yaw friction, speed, and
+        // rise time on the right, so all ten stay above the robot.
+        RECT resets[kKnobCount]{};
+        RECT tracks[kKnobCount]{};
+        const int colGap = 14;
+        const int colW = (right - left - colGap) / 2;
+        const int stride = 46;
+        const int axisRows = 6;
+        auto place = [&](int index, int col, int row) {
+            const int x0 = left + col * (colW + colGap);
+            const int x1 = x0 + colW;
+            const int y = cursor + row * stride;
+            resets[index] = RECT{x1 - 52, y, x1, y + 18};
+            tracks[index] = RECT{x0, y + 34, x1, y + 42};
+        };
+        for (int i = 0; i < kKnobLinFriction; ++i) place(i, 0, i);
+        for (int i = 0; i < axisRows; ++i) place(kKnobLinFriction + i, 1, i);
+        cursor += axisRows * stride + 4;
+        RECT sensCaption{left, cursor, right, cursor + 46};
+        cursor = sensCaption.bottom + 6;
+        const int chipH = 26;
+        const int chipGap = 6;
+        int chipX = left;
+        int chipY = cursor;
+        int rowBottom = chipY + chipH;
+        for (int i = 0; i < kSensCount; ++i) {
+            const int chipW = kSensWidth[i];
+            if (chipX > left && chipX + chipW > right) {
+                chipX = left;
+                chipY += chipH + chipGap;
+                rowBottom = chipY + chipH;
+            }
+            g_plant_sensor[i] = RECT{chipX, chipY, chipX + chipW, chipY + chipH};
+            chipX += chipW + chipGap;
+        }
+        cursor = rowBottom + 10;
+        RECT all{left, cursor, right, cursor + 28};
+        const int panelBottom = all.bottom + pad;
+        g_plant_panel = RECT{panelLeft, g_plant_drop.bottom + 6, panelRight, panelBottom};
+        for (int i = 0; i < kKnobCount; ++i) {
+            g_plant_reset[i] = resets[i];
+            g_plant_track[i] = tracks[i];
+        }
+        g_plant_all = all;
+
+        fillRoundRect(mem, g_plant_panel.left, g_plant_panel.top, g_plant_panel.right, g_plant_panel.bottom,
+                      10, RGB(28, 30, 34), RGB(78, 84, 94));
+        SelectObject(mem, hintFont);
+        drawUiText(mem, caption,
+                   "Domain randomization of the compiled plant. A tuned loop oscillates or misses when these move.",
+                   RGB(168, 174, 182), DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+
+        for (int i = 0; i < kKnobCount; ++i) {
+            const bool shifted = knobShifted(i, shown[i]);
+            const bool trackHot = g_plant_hover == kHitTrack + i || g_plant_drag == i;
+            const int rowLeft = tracks[i].left;
+            const int rowRight = tracks[i].right;
+            const int row = resets[i].top;
+            RECT label{rowLeft, row, resets[i].left - 4, row + 16};
+            char value[32];
+            formatKnob(i, shown[i], value, (int)sizeof(value));
+            SelectObject(mem, font);
+            drawUiText(mem, label, kKnobs[i].label, RGB(230, 232, 236),
+                       DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+            const int valueW = 64;
+            RECT hint{rowLeft, row + 18, rowRight - valueW - 4, row + 32};
+            RECT valueRect{rowRight - valueW, row + 18, rowRight, row + 32};
+            SelectObject(mem, hintFont);
+            drawUiText(mem, hint, kKnobs[i].hint, RGB(140, 146, 154),
+                       DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+            SelectObject(mem, font);
+            drawUiText(mem, valueRect, value,
+                       shifted ? RGB(255, 196, 120) : RGB(186, 196, 206),
+                       DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            drawResetChip(mem, resets[i], "Reset", g_plant_hover == kHitReset + i, !shifted);
+
+            const RECT& track = tracks[i];
+            const COLORREF accent = shifted ? RGB(214, 148, 64) : RGB(90, 148, 168);
+            fillRoundRect(mem, track.left, track.top, track.right, track.bottom, 8,
+                          RGB(16, 18, 22), trackHot ? RGB(180, 186, 194) : RGB(48, 52, 58));
+            const int width = track.right - track.left;
+            const int hx = track.left + (int)std::lround(knobT(kKnobs[i], shown[i]) * width);
+            if (hx > track.left + 2)
+                fillRoundRect(mem, track.left, track.top, hx, track.bottom, 8, accent, accent);
+            const int nx = track.left + (int)std::lround(knobT(kKnobs[i], kKnobs[i].original) * width);
+            HPEN tickPen = CreatePen(PS_SOLID, 2, RGB(226, 228, 232));
+            HGDIOBJ oldPen = SelectObject(mem, tickPen);
+            MoveToEx(mem, nx, track.top + 1, nullptr);
+            LineTo(mem, nx, track.bottom - 1);
+            SelectObject(mem, oldPen);
+            DeleteObject(tickPen);
+
+            const int mid = (track.top + track.bottom) / 2;
+            const int hr = 6;
+            HBRUSH handleBrush = CreateSolidBrush(RGB(236, 236, 236));
+            HPEN handlePen = CreatePen(PS_SOLID, 1, RGB(20, 22, 26));
+            HGDIOBJ oldBrush = SelectObject(mem, handleBrush);
+            oldPen = SelectObject(mem, handlePen);
+            Ellipse(mem, hx - hr, mid - hr, hx + hr, mid + hr);
+            SelectObject(mem, oldBrush);
+            SelectObject(mem, oldPen);
+            DeleteObject(handleBrush);
+            DeleteObject(handlePen);
+        }
+
+        SelectObject(mem, hintFont);
+        drawUiText(mem, sensCaption,
+                   "IMU holds its last heading. L enc and R enc report no travel. Front, Right, Rear, and Left drop that distance beam.",
+                   RGB(168, 174, 182), DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+        for (int i = 0; i < kSensCount; ++i) {
+            drawSensorChip(mem, g_plant_sensor[i], kSensLabel[i], sensor_off[i],
+                           g_plant_hover == kHitSensor + i);
+        }
+
+        drawResetChip(mem, all, "Reset plant", g_plant_hover == kHitAll, !any);
+    }
+
+    const bool dropHot = g_plant_hover == kHitDrop;
+    const COLORREF dropEdge = any ? RGB(214, 148, 64) : RGB(90, 148, 168);
+    const COLORREF dropFill = dropHot ? RGB(52, 56, 64) : RGB(40, 44, 50);
+    fillRoundRect(mem, g_plant_drop.left, g_plant_drop.top, g_plant_drop.right, g_plant_drop.bottom,
+                  8, dropFill, dropEdge);
+    RECT dropText = g_plant_drop;
+    dropText.left += 12;
+    dropText.right -= 26;
+    SelectObject(mem, font);
+    drawUiText(mem, dropText, any ? "Plant *" : "Plant", RGB(236, 236, 236),
+               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    drawChevron(mem, g_plant_drop.right - 22, g_plant_drop.top + (btnH - 6) / 2, g_plant_open);
+
+    SelectObject(mem, oldFont);
+    if (ownHint && hintFont != font) DeleteObject(hintFont);
+    if (ownFont) DeleteObject(font);
+}
+
+bool handlePlantClick(HWND hwnd, POINT p) {
+    const int hit = plantHit(p);
+    if (hit == kHitNone) return false;
+    if (hit == kHitDrop) {
+        g_plant_open = !g_plant_open;
+        g_plant_drag = -1;
+        ReleaseCapture();
+        return true;
+    }
+    if (hit == kHitPanel) return true;
+    if (hit >= kHitTrack && hit < kHitTrack + kKnobCount) {
+        g_plant_drag = hit - kHitTrack;
+        setKnobFromX(g_plant_drag, p.x);
+        SetCapture(hwnd);
+        return true;
+    }
+    if (hit >= kHitReset && hit < kHitReset + kKnobCount) {
+        resetKnob(hit - kHitReset);
+        return true;
+    }
+    if (hit >= kHitSensor && hit < kHitSensor + kSensCount) {
+        const int index = hit - kHitSensor;
+        std::lock_guard<std::mutex> guard(g_plant_mu);
+        g_sensor_off[index] = !g_sensor_off[index];
+        return true;
+    }
+    if (hit == kHitAll) {
+        resetPlantKnobs();
+        return true;
+    }
+    return true;
 }
 
 void paintField(HWND hwnd) {
@@ -920,6 +1403,7 @@ void paintField(HWND hwnd) {
     RestoreDC(mem, -1);
 
     drawSidePanel(mem, rightX, 0, rightW, h);
+    drawPlantPanel(mem, fieldX, fieldW);
 
     BitBlt(dc, 0, 0, w, h, mem, 0, 0, SRCCOPY);
 
@@ -948,6 +1432,10 @@ LRESULT CALLBACK fieldWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case WM_LBUTTONDOWN: {
             POINT p{ (LONG)(short)LOWORD(lp), (LONG)(short)HIWORD(lp) };
+            if (handlePlantClick(hwnd, p)) {
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
             if (handleAutonClick(p)) {
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
@@ -955,24 +1443,41 @@ LRESULT CALLBACK fieldWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (g_brain_w > 0 && PtInRect(&g_brain_lcd, p)) g_skip_brain = true;
             return 0;
         }
+        case WM_LBUTTONUP: {
+            if (g_plant_drag >= 0) {
+                g_plant_drag = -1;
+                ReleaseCapture();
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return 0;
+        }
         case WM_MOUSEMOVE: {
             POINT p{ (LONG)(short)LOWORD(lp), (LONG)(short)HIWORD(lp) };
+            if (g_plant_drag >= 0) setKnobFromX(g_plant_drag, p.x);
+            const int plantHover = plantHit(p);
             int hoverRow = -1;
             int hoverMenu = -1;
+            int hoverColor = -1;
             const bool hoverDrop = PtInRect(&g_drop_rect, p) != FALSE;
             if (g_drop_open) {
-                for (int i = 0; i < 3; ++i) {
+                for (int i = 0; i < kSideCount; ++i) {
                     if (PtInRect(&g_menu_rect[i], p)) hoverMenu = i;
                 }
             } else {
                 for (int i = 0; i < g_row_n; ++i) {
                     if (PtInRect(&g_row_rect[i], p)) hoverRow = g_row_index[i];
                 }
+                for (int i = 0; i < 2; ++i) {
+                    if (PtInRect(&g_color_rect[i], p)) hoverColor = i;
+                }
             }
-            if (hoverRow != g_hover_row || hoverMenu != g_hover_menu || hoverDrop != g_hover_drop) {
+            if (hoverRow != g_hover_row || hoverMenu != g_hover_menu || hoverColor != g_hover_color
+                || hoverDrop != g_hover_drop || plantHover != g_plant_hover || g_plant_drag >= 0) {
                 g_hover_row = hoverRow;
                 g_hover_menu = hoverMenu;
+                g_hover_color = hoverColor;
                 g_hover_drop = hoverDrop;
+                g_plant_hover = plantHover;
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             TRACKMOUSEEVENT ev{};
@@ -985,7 +1490,9 @@ LRESULT CALLBACK fieldWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_MOUSELEAVE:
             g_hover_row = -1;
             g_hover_menu = -1;
+            g_hover_color = -1;
             g_hover_drop = false;
+            g_plant_hover = kHitNone;
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         case WM_MOUSEWHEEL: {
@@ -1038,6 +1545,31 @@ void ensureFieldWindow() {
 }  // namespace
 
 namespace fieldwindow {
+
+PlantOverride plantOverride() {
+    std::lock_guard<std::mutex> guard(g_plant_mu);
+    PlantOverride over;
+    over.velocity_tau_sec = g_knob[kKnobLag];
+    over.skid_tau_sec = g_knob[kKnobSkid];
+    over.speed_scale = g_knob[kKnobSpeed];
+    over.lin_friction_v = g_knob[kKnobLinFriction];
+    over.lin_vel_scale = g_knob[kKnobLinVel];
+    over.lin_accel_scale = g_knob[kKnobLinAccel];
+    over.ang_friction_v = g_knob[kKnobAngFriction];
+    over.ang_vel_scale = g_knob[kKnobAngVel];
+    over.ang_accel_scale = g_knob[kKnobAngAccel];
+    const double tick_ms = System::DT_SEC * 1000.0;
+    int ticks = 0;
+    if (tick_ms > 1e-6) ticks = (int)std::lround(g_knob[kKnobDelay] / tick_ms);
+    if (ticks < 0) ticks = 0;
+    over.voltage_delay_ticks = ticks;
+    over.imu_off = g_sensor_off[kSensImu];
+    over.enc_left_off = g_sensor_off[kSensEncL];
+    over.enc_right_off = g_sensor_off[kSensEncR];
+    for (int i = 0; i < kDistanceChannels; ++i)
+        over.distance_off[i] = g_sensor_off[kSensDist + i];
+    return over;
+}
 
 void pollInput(JoystickData& joy, ButtonState& buttons) {
     joy.left_y  = stickAxis('S', 'W');

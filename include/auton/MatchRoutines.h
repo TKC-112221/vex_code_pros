@@ -1,7 +1,9 @@
 #pragma once
 /* ---------------------------------------------------------------------------
- * MatchRoutines  --  red and blue routes listed by the autonomous selector.
- * Edit the builders here. Register a name and a start pose in AutonCatalog.
+ * MatchRoutines  --  match routes listed by the autonomous selector.
+ * Edit the builders here. Register a name in AutonCatalog. startAt() on the
+ * routine is the pose that route begins at. Poses are the red side. The
+ * selector's color toggle mirrors the route onto blue.
  * ------------------------------------------------------------------------- */
 
 #include "auton/Routine.h"
@@ -10,11 +12,7 @@ class IFeedForward;
 
 namespace auton {
 
-Routine buildRedLow(const IFeedForward* model);
-Routine buildRedHigh(const IFeedForward* model);
-Routine buildRedCenter(const IFeedForward* model);
-Routine buildBlueLow(const IFeedForward* model);
-Routine buildBlueHigh(const IFeedForward* model);
-Routine buildBlueCenter(const IFeedForward* model);
+Routine buildLeftSide2(const IFeedForward* model);
+Routine buildRightSide2(const IFeedForward* model);
 
 } // namespace auton

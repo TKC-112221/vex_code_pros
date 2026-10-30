@@ -5,8 +5,10 @@
  *   chassis forward = sqrt(2) * (average wheel travel).
  * ------------------------------------------------------------------------- */
 #include "hardware/XDrive.h"
+#include "hardware/ChassisVoltage.h"
 #include "hardware/DeviceRead.h"
 #include "hardware/DifferentialMix.h"
+#include "logic/CascadeLift.h"
 #include "config/Ports.h"
 #include "config/Settings.h"
 #include "core/Specs.h"
@@ -50,8 +52,10 @@ void XDrive::initialize() {
     bl_->set_brake_mode(pros::MotorBrake::coast); br_->set_brake_mode(pros::MotorBrake::coast);
     main1_->set_brake_mode(pros::MotorBrake::hold);
     main2_->set_brake_mode(pros::MotorBrake::hold);
+    cascadeLift().zero(readCascade());
     sub1_->set_brake_mode(pros::MotorBrake::coast);
     sub2_->set_brake_mode(pros::MotorBrake::coast);
+    ranges_.probe();
 }
 
 void XDrive::beginSensorCalibration() {
@@ -86,6 +90,9 @@ void XDrive::calibrateSensors() {
 void XDrive::stop() {
     fl_->move_voltage(0); fr_->move_voltage(0);
     bl_->move_voltage(0); br_->move_voltage(0);
+    volt_surge_ = 0.0;
+    volt_yaw_ = 0.0;
+    volt_primed_ = false;
 }
 
 JoystickData XDrive::readJoystick() {
@@ -214,13 +221,22 @@ void XDrive::readDistances(DistanceReading (&out)[kDistanceChannels]) {
     ranges_.read(out);
 }
 
-ChassisCommand XDrive::applyDrive(const ChassisCommand& cmd, const ChassisObservation& /*obs*/) {
-    // Inverse kinematics: chassis effort -> four corner voltages.
+ChassisCommand XDrive::applyDrive(const ChassisCommand& cmd, const ChassisObservation& obs) {
+    ChassisVoltageState held;
+    held.v = volt_surge_;
+    held.w = volt_yaw_;
+    held.primed = volt_primed_;
+    const ChassisCommand volts = chassisVoltage(cmd, obs, nullptr, held);
+    volt_surge_ = held.v;
+    volt_yaw_ = held.w;
+    volt_primed_ = held.primed;
+
+    // Inverse kinematics: chassis volts -> four corner voltages.
     double v[4] = {
-        cmd.linear - cmd.lateral - cmd.angular,   // FL
-        cmd.linear + cmd.lateral + cmd.angular,   // FR
-        cmd.linear + cmd.lateral - cmd.angular,   // BL
-        cmd.linear - cmd.lateral + cmd.angular    // BR
+        volts.linear - volts.lateral - volts.angular,   // FL
+        volts.linear + volts.lateral + volts.angular,   // FR
+        volts.linear + volts.lateral - volts.angular,   // BL
+        volts.linear - volts.lateral + volts.angular    // BR
     };
 
     double scale = 1.0;
@@ -233,9 +249,10 @@ ChassisCommand XDrive::applyDrive(const ChassisCommand& cmd, const ChassisObserv
     br_->move_voltage(voltsToMv(v[3] * scale * bscale));
 
     ChassisCommand applied;
-    applied.linear  = cmd.linear  * scale;
-    applied.lateral = cmd.lateral * scale;
-    applied.angular = cmd.angular * scale;
+    applied.linear  = volts.linear  * scale;
+    applied.lateral = volts.lateral * scale;
+    applied.angular = volts.angular * scale;
+    applied.request = DriveRequest::Volts;
     return applied;
 }
 
@@ -244,11 +261,13 @@ CascadeReading XDrive::readCascade() const {
 }
 
 void XDrive::applySubsystems(const SubsystemCommand& sub) {
-    const MainPairPct pair = mixMainPair(sub.cascade_pct, sub.intake_pct);
+    SubsystemCommand cmd = sub;
+    cascadeLift().writePercent(cmd, readCascade());
+    const MainPairPct pair = mixMainPair(cmd.cascade_pct, cmd.intake_pct);
     main1_->move_voltage(pctToMv(pair.main1_pct));
     main2_->move_voltage(pctToMv(pair.main2_pct));
     sub1_->move_voltage(0);
     sub2_->move_voltage(0);
-    pneumatics_g_->set_value(sub.pneumatics_g_state);
-    pneumatics_b_->set_value(sub.pneumatics_b_state);
+    pneumatics_g_->set_value(cmd.pneumatics_g_state);
+    pneumatics_b_->set_value(cmd.pneumatics_b_state);
 }

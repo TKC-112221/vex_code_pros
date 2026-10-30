@@ -20,8 +20,8 @@ inline bool touches(double x_m, double y_m, double theta,
                     double gx, double gy, double& contact_left_m) {
     const double half_l = Robot::Chassis::BODY_LENGTH_M * 0.5;
     const double half_w = Robot::Chassis::TRACK_WIDTH_M * 0.5;
-    const double c = std::cos(theta);
-    const double s = std::sin(theta);
+    const double c = mathutil::heading_cos(theta);
+    const double s = mathutil::heading_sin(theta);
     const double dx = gx - x_m;
     const double dy = gy - y_m;
     const double forward = dx * c + dy * s;
@@ -37,8 +37,8 @@ inline bool touches(double x_m, double y_m, double theta,
 inline void placeCenter(double& x_m, double& y_m, double theta,
                         double gx, double gy, double contact_left_m) {
     const double half_l = Robot::Chassis::BODY_LENGTH_M * 0.5;
-    const double c = std::cos(theta);
-    const double s = std::sin(theta);
+    const double c = mathutil::heading_cos(theta);
+    const double s = mathutil::heading_sin(theta);
     x_m = gx - half_l * c + contact_left_m * s;
     y_m = gy - half_l * s - contact_left_m * c;
 }
@@ -59,7 +59,7 @@ inline CenterWish centerWish(double x_m, double y_m, double theta,
     const double dyg = gy - y_m;
     const double dist = std::hypot(dxg, dyg);
     double theta_face = theta;
-    if (dist > 1e-6) theta_face = std::atan2(dyg, dxg);
+    if (dist > 1e-6) theta_face = mathutil::direction_heading(dxg, dyg);
     double x_face = 0.0;
     double y_face = 0.0;
     placeCenter(x_face, y_face, theta_face, gx, gy, 0.0);
@@ -73,8 +73,8 @@ inline CenterWish centerWish(double x_m, double y_m, double theta,
         return wish;
     }
 
-    const double c = std::cos(theta);
-    const double s = std::sin(theta);
+    const double c = mathutil::heading_cos(theta);
+    const double s = mathutil::heading_sin(theta);
     const double inv = 1.0 / GoalAlign::CENTER_TAU_SEC;
     const double lim = (speed_limit > 1e-3) ? speed_limit : 1.0e9;
     wish.v_fwd = mathutil::clamp_val((ex * c + ey * s) * inv, -lim, lim);

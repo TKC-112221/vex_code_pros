@@ -26,10 +26,12 @@ constexpr double kInchesPerMeter = 1.0 / kMetersPerInch;
 // Position only. Path samples, particles, and logs use this.
 // Origin is the center of the bottom edge of the 12 ft field (Robot::Range).
 // +x toward the right wall, +y toward the far wall.
+// A chassis pose locates the middle of the front bumper. The geometric
+// center, where wheel travel is measured, sits half a body length behind it.
 struct Pose2d {
     double x = 0;      // inches, field frame
     double y = 0;      // inches, field frame
-    double theta = 0;  // radians, field frame. 0 = +X, CCW positive
+    double theta = 0;  // radians, field frame. 0 = +Y, CCW positive
 };
 
 inline double metersToInches(double meters) { return meters * kInchesPerMeter; }
@@ -63,15 +65,25 @@ struct MotionPose {
 // κ and dκ/ds from the change in that tangent. d²κ/ds² stays zero.
 enum class FollowerInput { Curvature, Heading };
 
+// Which chassis point a command's x, y, and heading name.
+// Tracking is the front bumper localization reports. Rotation is the
+// centre the chassis yaws about. Followers track Rotation. A Tracking
+// command is shifted by tracking::kRotationToTrackingForwardM before the plan.
+enum class CommandPoint { Tracking, Rotation };
+
 // Keep-out for a line-segment plan. x, y, and min_dist are inches, the same
-// frame as Pose2d. min_dist is the radius pose centers stay outside.
+// frame as Pose2d. min_dist is the obstacle's own radius. The segment
+// planner grows it by the bumper corner and a clearance margin. fixed
+// means min_dist is already the circle the path stays outside.
 struct PathObstacle {
     double x = 0;
     double y = 0;
     double min_dist = 0;
+    bool fixed = false;
 };
 
-constexpr int kPathObstacles = 4;
+// Nine align goals, plus room for keep-outs a path adds itself.
+constexpr int kPathObstacles = 16;
 
 // Extra limits for a MotionPose drive. max_accel_mps2 < 0 keeps the
 // follower's own acceleration. handoff_in > 0 ends the drive that far from
@@ -92,6 +104,8 @@ struct PathConstraints {
     double handoff_in = 0.0;
     bool turn_on_goal = false;
     FollowerInput follower_input = FollowerInput::Curvature;
+    // Tracking names the front bumper. Rotation names the yaw centre.
+    CommandPoint point = CommandPoint::Tracking;
     bool line_segments = false;
     bool field_bound = false;
     int obstacle_n = 0;
@@ -169,29 +183,61 @@ struct MotionTarget {
     bool   passthrough_effort = false;
 };
 
+// What a ChassisCommand / CommandVector is carrying.
+// Motion is a velocity: linear and lateral are m/s, angular is rad/s,
+// accel is m/s^2, alpha is rad/s^2. The drive base turns that into volts
+// with its VAS model. Volts is finished motor voltage, used when a log
+// replays the voltage that was applied. Stick and Press remain so older
+// call sites still compile; new commands use Motion.
+enum class DriveRequest { Volts, Stick, Motion, Press };
+
 // ---- Controller output -----------------------------------------------------
-// Generalized chassis-frame effort. For a voltage-driven plant these carry
-// volts, but the units are the DriveBase's concern. main.cpp never unpacks
-// this into wheels; only the DriveBase does.
+// Chassis-frame command. main.cpp never unpacks this into wheels.
+// Motion is the control input. Only a drive-base class turns it into volts.
 struct ChassisCommand {
-    double linear = 0;    // effort along forward axis
-    double lateral = 0;   // effort along left axis (holonomic only)
-    double angular = 0;   // effort about vertical axis
+    double linear = 0;    // forward, m/s. Volts when request is Volts.
+    double lateral = 0;   // left, m/s. Volts when request is Volts.
+    double angular = 0;   // CCW, rad/s. Volts when request is Volts.
     bool   brake = false; // request a gentle per-actuator brake (stick-zero)
+    DriveRequest request = DriveRequest::Motion;
+    double accel = 0;     // planned forward accel, m/s^2. Zero lets the drive difference the velocity.
+    double alpha = 0;     // planned yaw accel, rad/s^2
+    bool pivot = false;   // in-place yaw. The drive does not add a separate scrub gain.
 };
 
 // Pipeline command vector (plan vocabulary: surge / sway / yaw).
-// Same chassis-frame axes as ChassisCommand::{linear, lateral, angular}.
+// Same chassis-frame axes and the same DriveRequest as ChassisCommand.
 struct CommandVector {
-    double surge = 0;   // forward
-    double sway  = 0;   // left (holonomic)
-    double yaw   = 0;   // CCW about vertical
+    double surge = 0;   // forward, m/s unless request is Volts
+    double sway  = 0;   // left (holonomic), m/s unless request is Volts
+    double yaw   = 0;   // CCW, rad/s unless request is Volts
+    DriveRequest request = DriveRequest::Motion;
+    double accel = 0;
+    double alpha = 0;
+    bool pivot = false;
 
     ChassisCommand toChassis(bool brake = false) const {
-        return ChassisCommand{surge, sway, yaw, brake};
+        ChassisCommand cmd;
+        cmd.linear = surge;
+        cmd.lateral = sway;
+        cmd.angular = yaw;
+        cmd.brake = brake;
+        cmd.request = request;
+        cmd.accel = accel;
+        cmd.alpha = alpha;
+        cmd.pivot = pivot;
+        return cmd;
     }
     static CommandVector fromChassis(const ChassisCommand& c) {
-        return CommandVector{c.linear, c.lateral, c.angular};
+        CommandVector cmd;
+        cmd.surge = c.linear;
+        cmd.sway = c.lateral;
+        cmd.yaw = c.angular;
+        cmd.request = c.request;
+        cmd.accel = c.accel;
+        cmd.alpha = c.alpha;
+        cmd.pivot = c.pivot;
+        return cmd;
     }
 };
 
@@ -206,7 +252,17 @@ struct SubsystemCommand {
     bool pneumatics_g_state = false;
     bool pneumatics_b_state = false;
     bool score = false;        // rising edge starts the scoring macro
+    // Bits in RobotMacro.h. A routine holds a bit while it wants that macro.
+    // The runner starts the matching macro. Buttons still start the same ones.
+    uint8_t macro_request = 0;
     uint8_t raw_bitmask = 0;   // exact requested button state (for logging/replay)
+    // When set, the cascade wrapper replaces cascade_pct with the voltage
+    // that holds cascade_target_in. Inches, zeroed at program start.
+    bool cascade_height = false;
+    double cascade_target_in = 0;
+    // Driver or replayed shoulder command. Open-loop percent is not cut
+    // off at CascadeLift::kMaxIn.
+    bool cascade_manual = false;
 };
 
 // Common-mode reading of the MAIN1/MAIN2 differential. Positive is up.
@@ -231,6 +287,7 @@ inline SubsystemCommand mixShoulderButtons(bool r1, bool r2, bool l1, bool l2,
     sub.pneumatics_g_state = pneumatic_g;
     sub.pneumatics_b_state = pneumatic_b;
     sub.raw_bitmask = bitmask;
+    sub.cascade_manual = true;
     return sub;
 }
 
@@ -245,6 +302,7 @@ struct SubsystemIntent {
     bool pneumatic_g = false;
     bool pneumatic_b = false;
     bool score = false;
+    uint8_t macro_request = 0;
 
     // Solo intake matches a driver holding only R1 or R2. Cascade matches
     // L1 / L2. Jammed and Idle contribute no motor voltage.
@@ -264,6 +322,7 @@ struct SubsystemIntent {
         out.pneumatics_g_state = pneumatic_g;
         out.pneumatics_b_state = pneumatic_b;
         out.score = score;
+        out.macro_request = macro_request;
         return out;
     }
 };
@@ -288,8 +347,8 @@ struct ButtonState {
 // observation via forward kinematics. Estimators consume ONLY this, so they
 // never need to know how many wheels there are or how they are arranged.
 struct ChassisObservation {
-    double forward_delta = 0;   // meters travelled along heading since last read
-    double strafe_delta = 0;    // meters travelled sideways (holonomic; 0 for tank)
+    double forward_delta = 0;   // meters the geometric center travelled along heading
+    double strafe_delta = 0;    // meters the geometric center travelled sideways (left +)
     double heading_rad = 0;     // absolute heading estimate to fuse
     double v_lin = 0;           // measured forward velocity (m/s)
     double v_ang = 0;           // measured angular velocity (rad/s)

@@ -6,15 +6,17 @@
  * not open the field window. read_policy() is DrivePolicy::read, so the
  * observation vector matches the firmware actor.
  * ------------------------------------------------------------------------- */
-#include "config/Settings.h"
+#include "auton/TurnToHeading.h"
 #include "control/DriftFollower.h"
 #include "control/DrivePolicy.h"
+#include "control/SegmentFollower.h"
 #include "control/VASController.h"
 #include "core/LogFrame.h"
 #include "core/Specs.h"
 #include "core/Tuning.h"
 #include "estimators/ImuLinearDelta.h"
 #include "estimators/OdometryEstimator.h"
+#include "math/TrackingCenter.h"
 #include "hardware/MockDrive.h"
 #include "hardware/MockDriveParams.h"
 #include "logic/GoalAligner.h"
@@ -25,6 +27,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -63,7 +66,8 @@ public:
     // Place the plant, then start the same localizer the firmware runs:
     // noisy IMU and encoders, accelerometer travel, wheel-odometry fusion,
     // and the wall nudge. `seed` redraws that IMU so a rollout is repeatable.
-    // The estimate begins on the true pose, which is the auton start override.
+    // x_in, y_in are the geometric center, the same point reset() stores.
+    // The estimate starts at the front middle of that chassis.
     void localizeReset(double x_in, double y_in, double theta,
                        double v_lin, double v_lat, double v_ang,
                        std::uint64_t seed) {
@@ -71,7 +75,9 @@ public:
         drive_.armLocalization(seed);
         imu_delta_.reset();
         estimator_.reset();
-        estimator_.overridePose(Pose2d{x_in, y_in, theta});
+        const Pose2d front = poseMetersToInches(tracking::trackingFromCenter(
+            poseInchesToMeters(Pose2d{x_in, y_in, theta})));
+        estimator_.overridePose(front);
         prev_heading_ = theta;
         localizing_ = true;
     }
@@ -85,10 +91,25 @@ public:
         return LocEstimate{state.pose.x, state.pose.y, state.pose.theta, state.v_lin, state.v_ang};
     }
 
-    // Chassis volts on the universal command axes. sway is stored and
-    // ignored by the differential plant, matching TankDrive.
+    // Recorded motor voltage. Sysid replays applied volts through here.
+    // A control step uses stepVelocity, which is m/s and rad/s.
     MockDrive::PlantSnapshot step(double surge, double sway, double yaw) {
         ChassisCommand cmd;
+        cmd.request = DriveRequest::Volts;
+        cmd.linear = surge;
+        cmd.lateral = sway;
+        cmd.angular = yaw;
+        drive_.applyDrive(cmd, ChassisObservation{});
+        drive_.stepSimulation(System::DT_SEC);
+        if (localizing_) ingestSensors();
+        return drive_.plantSnapshot();
+    }
+
+    // One control tick. surge and sway are m/s, yaw is rad/s. applyDrive
+    // turns that velocity into volts with the plant's VAS model.
+    MockDrive::PlantSnapshot stepVelocity(double surge, double sway, double yaw) {
+        ChassisCommand cmd;
+        cmd.request = DriveRequest::Motion;
         cmd.linear = surge;
         cmd.lateral = sway;
         cmd.angular = yaw;
@@ -113,7 +134,7 @@ public:
 private:
     void ingestSensors() {
         ChassisObservation obs = drive_.readObservation(prev_heading_);
-        imu_delta_.apply(obs, System::DT_SEC, !Settings::ControlToggles::IMU_FALLBACK);
+        imu_delta_.apply(obs, System::DT_SEC);
         SensorDict sensors;
         sensors.chassis = obs;
         drive_.readDistances(sensors.distance);
@@ -259,6 +280,146 @@ private:
     double max_accel_ = Practice::MAX_ACCEL_MPS2;
 };
 
+// TurnToHeading, the pivot Drive routines run. begin() drops the previous
+// heading. command() is one scheduler tick from the estimate it is given.
+class TurnGuide {
+public:
+    TurnGuide() : feedforward_(makeFeedforward()) {}
+
+    TurnGuide(const TurnGuide&) = delete;
+    TurnGuide& operator=(const TurnGuide&) = delete;
+
+    void begin(double heading) {
+        auton::TurnConstraints turn;
+        turn.max_vel_rad_s = max_vel_;
+        turn.max_accel_rad_s2 = max_accel_;
+        command_ = auton::TurnToHeading(heading, turn, &feedforward_);
+        started_ = false;
+    }
+
+    void configure(double ks_lin, double kv_lin, double ka_lin,
+                   double ks_ang, double kv_ang, double ka_ang,
+                   double max_vel, double max_accel) {
+        feedforward_.setGains(ks_lin, kv_lin, ka_lin, ks_ang, kv_ang, ka_ang);
+        max_vel_ = max_vel;
+        max_accel_ = max_accel;
+    }
+
+    std::tuple<double, double, double> command(double x_in, double y_in, double theta,
+                                               double v_lin, double v_ang) {
+        if (!command_) return {0.0, 0.0, 0.0};
+        const StateEstimate est = estimateFrom(x_in, y_in, theta, v_lin, v_ang);
+        auton::CommandTick tick{est};
+        if (!started_) {
+            command_->initialize(tick);
+            started_ = true;
+        }
+        command_->execute(tick);
+        return {tick.drive.linear, tick.drive.lateral, tick.drive.angular};
+    }
+
+private:
+    VASController feedforward_;
+    std::optional<auton::TurnToHeading> command_;
+    bool started_ = false;
+    double max_vel_ = Turn::MAX_VEL_RAD_S;
+    double max_accel_ = Turn::MAX_ACCEL_RAD_S2;
+};
+
+// SegmentFollower, the polyline DriveTo uses when segmentPath() is set.
+// begin() matches DriftGuide so the tuner can hand it the same pose.
+class SegmentGuide {
+public:
+    SegmentGuide() : feedforward_(makeFeedforward()) {
+        follower_.bindFeedforward(&feedforward_);
+    }
+
+    SegmentGuide(const SegmentGuide&) = delete;
+    SegmentGuide& operator=(const SegmentGuide&) = delete;
+
+    void clearBlock() { have_block_ = false; }
+
+    void setBlock(double x_in, double y_in, double radius_in) {
+        block_x_ = x_in;
+        block_y_ = y_in;
+        block_r_ = radius_in;
+        have_block_ = true;
+    }
+
+    void begin(double target_x, double target_y, double exit_direction, double exit_speed,
+               bool backwards, bool ignore_direction, const std::string& /*shape*/,
+               bool /*timed_elastic*/) {
+        follower_.reset();
+        follower_.config.forwards = !backwards;
+        follower_.config.obstacle_n = 0;
+        if (have_block_ && block_r_ > 0.0) {
+            follower_.config.obstacle_n = 1;
+            follower_.config.obstacles[0] = {block_x_, block_y_, block_r_};
+        }
+        follower_.target = targetFrom(target_x, target_y, exit_direction, exit_speed,
+                                      backwards, ignore_direction);
+        if (max_accel_ >= 0.0) follower_.target.max_accel = max_accel_;
+        follower_.bindFeedforward(&feedforward_);
+    }
+
+    void configure(double ks_lin, double kv_lin, double ka_lin,
+                   double ks_ang, double kv_ang, double ka_ang,
+                   double path_accel, double min_accel,
+                   double head_kp, double head_ki, double head_kd, double head_windup,
+                   double stanley_k, double stanley_soft, double pivot_rad,
+                   double settle_speed, double settle_in, double settle_deg,
+                   double max_accel) {
+        feedforward_.setGains(ks_lin, kv_lin, ka_lin, ks_ang, kv_ang, ka_ang);
+        follower_.bindFeedforward(&feedforward_);
+        auto& c = follower_.config;
+        c.path_accel = path_accel;
+        c.min_accel = min_accel;
+        c.head_kP = head_kp;
+        c.head_kI = head_ki;
+        c.head_kD = head_kd;
+        c.head_windup = head_windup;
+        c.stanley_k = stanley_k;
+        c.stanley_soft = stanley_soft;
+        c.pivot_rad = pivot_rad;
+        c.settle_speed = settle_speed;
+        c.settle_in = settle_in;
+        c.settle_deg = settle_deg;
+        max_accel_ = max_accel;
+    }
+
+    std::tuple<double, double, double> command(double x_in, double y_in, double theta,
+                                               double v_lin, double v_ang) {
+        const ChassisCommand motion = follower_.compute(estimateFrom(x_in, y_in, theta, v_lin, v_ang));
+        return {motion.linear, motion.lateral, motion.angular};
+    }
+
+    py::list path(double x_in, double y_in, double theta, double v_lin, double v_ang) const {
+        return polyline(x_in, y_in, theta, v_lin, v_ang);
+    }
+
+    py::list base_path(double x_in, double y_in, double theta, double v_lin, double v_ang) const {
+        return polyline(x_in, y_in, theta, v_lin, v_ang);
+    }
+
+private:
+    py::list polyline(double x_in, double y_in, double theta, double v_lin, double v_ang) const {
+        Pose2d from{x_in, y_in, theta};
+        Pose2d samples[64];
+        const int n = follower_.samplePath(from, samples, 64, v_lin, v_ang);
+        py::list out;
+        for (int i = 0; i < n; ++i) out.append(py::make_tuple(samples[i].x, samples[i].y));
+        return out;
+    }
+
+    VASController feedforward_;
+    SegmentFollower follower_;
+    double max_accel_ = -1.0;
+    bool have_block_ = false;
+    double block_x_ = 0.0;
+    double block_y_ = 0.0;
+    double block_r_ = 0.0;
+};
+
 // Raw LogFrame file written by LogFrameReplayer (skills_auto.bin / prematch.bin).
 std::vector<py::dict> readLog(const std::string& path) {
     std::vector<py::dict> out;
@@ -333,6 +494,43 @@ PYBIND11_MODULE(plant, m) {
              py::arg("settle_speed"), py::arg("min_accel"), py::arg("turn_radius_max"),
              py::arg("kappa_eps"), py::arg("settle_in"), py::arg("settle_deg"), py::arg("max_accel"));
 
+    py::class_<TurnGuide>(m, "TurnGuide")
+        .def(py::init<>())
+        .def("begin", &TurnGuide::begin, py::arg("heading"))
+        .def("command", &TurnGuide::command,
+             py::arg("x_in"), py::arg("y_in"), py::arg("theta"), py::arg("v_lin"), py::arg("v_ang"))
+        .def("configure", &TurnGuide::configure,
+             py::arg("ks_lin"), py::arg("kv_lin"), py::arg("ka_lin"),
+             py::arg("ks_ang"), py::arg("kv_ang"), py::arg("ka_ang"),
+             py::arg("max_vel"), py::arg("max_accel"));
+
+    py::class_<SegmentGuide>(m, "SegmentGuide")
+        .def(py::init<>())
+        .def("begin", &SegmentGuide::begin,
+             py::arg("target_x"), py::arg("target_y"), py::arg("exit_direction"),
+             py::arg("exit_speed"), py::arg("backwards") = false,
+             py::arg("ignore_direction") = false,
+             py::arg("shape") = "Hermite", py::arg("timed_elastic") = true)
+        .def("command", &SegmentGuide::command,
+             py::arg("x_in"), py::arg("y_in"), py::arg("theta"), py::arg("v_lin"), py::arg("v_ang"))
+        .def("path", &SegmentGuide::path,
+             py::arg("x_in"), py::arg("y_in"), py::arg("theta"),
+             py::arg("v_lin") = 0.0, py::arg("v_ang") = 0.0)
+        .def("base_path", &SegmentGuide::base_path,
+             py::arg("x_in"), py::arg("y_in"), py::arg("theta"),
+             py::arg("v_lin") = 0.0, py::arg("v_ang") = 0.0)
+        .def("set_block", &SegmentGuide::setBlock,
+             py::arg("x_in"), py::arg("y_in"), py::arg("radius_in"))
+        .def("clear_block", &SegmentGuide::clearBlock)
+        .def("configure", &SegmentGuide::configure,
+             py::arg("ks_lin"), py::arg("kv_lin"), py::arg("ka_lin"),
+             py::arg("ks_ang"), py::arg("kv_ang"), py::arg("ka_ang"),
+             py::arg("path_accel"), py::arg("min_accel"),
+             py::arg("head_kp"), py::arg("head_ki"), py::arg("head_kd"), py::arg("head_windup"),
+             py::arg("stanley_k"), py::arg("stanley_soft"), py::arg("pivot_rad"),
+             py::arg("settle_speed"), py::arg("settle_in"), py::arg("settle_deg"),
+             py::arg("max_accel"));
+
     py::class_<PlantSim>(m, "PlantSim")
         .def(py::init<>())
         .def("reset", &PlantSim::reset,
@@ -343,6 +541,7 @@ PYBIND11_MODULE(plant, m) {
              py::arg("v_lin") = 0.0, py::arg("v_lat") = 0.0, py::arg("v_ang") = 0.0,
              py::arg("seed") = 1)
         .def("step", &PlantSim::step, py::arg("surge"), py::arg("sway"), py::arg("yaw"))
+        .def("step_velocity", &PlantSim::stepVelocity, py::arg("surge"), py::arg("sway"), py::arg("yaw"))
         .def("state", &PlantSim::state)
         .def("estimate", &PlantSim::estimate)
         .def("set_dynamics", &PlantSim::setDynamics,
@@ -489,8 +688,15 @@ PYBIND11_MODULE(plant, m) {
     m.attr("KAPPA_EPS") = Motion::KAPPA_EPS;
     m.attr("TURN_RADIUS_MAX") = Physics::TURN_RADIUS_MAX_M;
     m.attr("PRACTICE_ACCEL") = Practice::MAX_ACCEL_MPS2;
+    m.attr("TURN_MAX_VEL") = Turn::MAX_VEL_RAD_S;
+    m.attr("TURN_MAX_ACCEL") = Turn::MAX_ACCEL_RAD_S2;
+    m.attr("STANLEY_K") = Segment::STANLEY_K;
+    m.attr("STANLEY_SOFT") = Segment::STANLEY_SOFT;
+    m.attr("PIVOT_RAD") = Segment::PIVOT_RAD;
     m.attr("METERS_PER_INCH") = kMetersPerInch;
     m.attr("MAX_VOLTS") = System::MAX_VOLTS;
+    m.attr("MAX_VEL_LIN") = Robot::MAX_VEL_LIN;
+    m.attr("MAX_VEL_ANG") = Robot::MAX_VEL_ANG;
     m.attr("MAX_VEL_LIN") = Robot::MAX_VEL_LIN;
     m.attr("MAX_VEL_ANG") = Robot::MAX_VEL_ANG;
     m.attr("HISTORY") = DrivePolicy::kHistory;

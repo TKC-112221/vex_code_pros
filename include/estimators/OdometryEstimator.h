@@ -11,6 +11,7 @@
 #include "interfaces/IEstimator.h"
 #include "estimators/Odometry.h"
 #include "math/MathUtils.h"
+#include "math/TrackingCenter.h"
 #include "math/WallRange.h"
 #include "core/Specs.h"
 #include "core/Tuning.h"
@@ -18,7 +19,7 @@
 class OdometryEstimator : public IEstimator {
 public:
     void reset() override {
-        odom_.setPose(Pose2d{Robot::Range::CENTER_X_M, Robot::Range::CENTER_Y_M, 0.0});
+        odom_.setPose(tracking::origin());
         total_heading_ = 0.0;
         prev_theta_ = 0.0;
         v_lin_ = v_ang_ = 0.0;
@@ -32,12 +33,15 @@ public:
         range_phase_ = 0;
     }
 
+    void clearVelocity() override { v_lin_ = v_ang_ = 0.0; }
+
     void update(const SensorDict& sensors) override {
         const ChassisObservation& obs = sensors.chassis;
         odom_.update(obs.forward_delta, obs.strafe_delta, obs.heading_rad);
         // Once per distance-sensor period. The walls do not move, and the
         // sensor does not publish a new range on the ticks in between.
         if (range_phase_ == 0) {
+            // Beams are Robot::Range::TRACKING_OFFSET from this pose.
             wallrange::nudgePosition(odom_.pose.x, odom_.pose.y, odom_.pose.theta,
                                      sensors.distance, kDistanceChannels,
                                      WallNudge::ODOM_GAIN, WallNudge::STEP_M, WallNudge::GATE_M);

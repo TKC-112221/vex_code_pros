@@ -31,6 +31,24 @@ public:
     double forwardVelocity() const { return v_fwd_; }
     double lateralVelocity() const { return v_lat_; }
 
+    // How far this tick's specific force (G) sits from the acceleration of
+    // the wheel speed and the skid formula. A brake the wheels also show
+    // is near zero. A bumper stop, or a shove the rollers did not produce,
+    // is not.
+    double surpriseG(double v_wheel, double omega, double ax_g, double ay_g, double dt_sec) const {
+        if (!(dt_sec > 0.0) || !std::isfinite(dt_sec)) return 0.0;
+        if (!std::isfinite(v_wheel)) v_wheel = v_fwd_;
+        if (!std::isfinite(omega)) omega = 0.0;
+        if (!std::isfinite(ax_g)) ax_g = 0.0;
+        if (!std::isfinite(ay_g)) ay_g = 0.0;
+        const double a_wheel = (v_wheel - v_fwd_) / dt_sec;
+        const double tau = MockPlant::SKID_TAU_SEC;
+        const double a_lat = (tau > 1.0e-4) ? (-omega * v_wheel - v_lat_ / tau) : 0.0;
+        const double ax = ax_g * Robot::G_MPS2;
+        const double ay = ay_g * Robot::G_MPS2;
+        return std::hypot(ax - a_wheel, ay - a_lat) / Robot::G_MPS2;
+    }
+
     // obs.forward_delta stays the encoder distance. strafe_delta becomes
     // the skid over this same interval.
     void apply(ChassisObservation& obs, double dt_sec) {

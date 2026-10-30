@@ -2,6 +2,7 @@
  * DriftFollower.cpp  --  plan a DriftCurve once, then track it.
  * ------------------------------------------------------------------------- */
 #include "control/DriftFollower.h"
+#include "math/TrackingCenter.h"
 #include "control/DriftPathFit.h"
 #include "core/Tuning.h"
 #include "logic/GoalAligner.h"
@@ -14,10 +15,6 @@
 using namespace driftpath;
 
 namespace {
-
-double voltsPerPower() {
-    return System::MAX_VOLTS / Controller::FULL_SCALE;
-}
 
 // asin(u) derivatives divide by (1−u²)^(3/2). Past this, that term is
 // treated as flat so a max-drift u near 1 cannot blow up yaw acceleration.
@@ -203,7 +200,7 @@ void sampleArc(DriftFollower::Sample* out, int& n, int cap, const Arc& arc,
             tx = -tx;
             ty = -ty;
         }
-        const double phi = std::atan2(ty, tx);
+        const double phi = mathutil::direction_heading(tx, ty);
         const double kappa = (std::fabs(arc.r) > 1e-9) ? 1.0 / arc.r : 0.0;
         pushPoint(out, n, cap, x, y, phi, kappa);
     }
@@ -393,6 +390,7 @@ void DriftFollower::reset() {
     v_cmd_primed_ = false;
     goal_heading_ = 0.0;
     settled_ = false;
+    stuck_watch_.reset();
     small_held_ = 0.0;
     large_held_ = 0.0;
     dist_armed_ = false;
@@ -403,15 +401,16 @@ void DriftFollower::reset() {
     a_actual_lat_ = 0.0;
 }
 
-// Orbit of a seated nose. Heading sweeps from the measured pose to `nose`,
-// and every sample sits half a body length from the pivot with the nose
-// pointed at it. phi is that heading, so the field window faces the goal
-// instead of the tangent of the arc.
+// Orbit of a seated nose. `from` is the front middle. The samples are the
+// geometric center, half a body length from the pivot, nose pointed at it.
+// phi is that heading, so the field window faces the goal instead of the
+// tangent of the arc.
 int planGoalOrbit(const Pose2d& from, double nose, DriftFollower::Sample* out, int cap) {
     if (out == nullptr || cap < 2) return 0;
+    const Pose2d center = tracking::centerFromTracking(from);
     double gx = 0.0;
     double gy = 0.0;
-    goalAlignPivot(poseMetersToInches(from), gx, gy);
+    goalAlignPivot(poseMetersToInches(center), gx, gy);
     const double error = mathutil::normalize_angle(nose - from.theta);
     const double half_l = Robot::Chassis::BODY_LENGTH_M * 0.5;
     const double kappa = (std::fabs(error) < 1e-6 || half_l < 1e-6)
@@ -448,7 +447,7 @@ int DriftFollower::buildPlan(const DriftFollowerConfig& config, const DriftCurve
     const double dist = std::hypot(tx - from.x, ty - from.y);
     double approach = target.exit_direction;
     if (target.ignore_direction && dist > 1e-4) {
-        approach = std::atan2(ty - from.y, tx - from.x);
+        approach = mathutil::direction_heading(tx - from.x, ty - from.y);
     }
     const bool forwards = config.forwards && !target.backwards;
     const double nose = forwards
@@ -466,19 +465,19 @@ int DriftFollower::buildPlan(const DriftFollowerConfig& config, const DriftCurve
         std::fabs(mathutil::normalize_angle(nose - from.theta)) * (180.0 / Robot::PI);
     const bool heading_near = target.ignore_direction || head_err_deg < large_deg;
     const double along_exit =
-        (tx - from.x) * std::cos(approach) + (ty - from.y) * std::sin(approach);
+        (tx - from.x) * mathutil::heading_cos(approach) + (ty - from.y) * mathutil::heading_sin(approach);
     const bool sideways = along_exit < 0.5 * dist;
     if (std::fabs(target.exit_speed) < 1e-3 && heading_near && sideways
         && dist < config.close_m) {
-        const double ux = std::cos(approach);
-        const double uy = std::sin(approach);
+        const double ux = mathutil::heading_cos(approach);
+        const double uy = mathutil::heading_sin(approach);
         pushPoint(out, n, kCap, tx - 0.01 * ux, ty - 0.01 * uy, approach, 0.0);
         pushPoint(out, n, kCap, tx, ty, approach, 0.0);
         return n;
     }
     if (dist < 1e-4) {
-        const double ux = std::cos(approach);
-        const double uy = std::sin(approach);
+        const double ux = mathutil::heading_cos(approach);
+        const double uy = mathutil::heading_sin(approach);
         pushPoint(out, n, kCap, tx - 0.01 * ux, ty - 0.01 * uy, approach, 0.0);
         pushPoint(out, n, kCap, tx, ty, approach, 0.0);
         return n;
@@ -488,8 +487,8 @@ int DriftFollower::buildPlan(const DriftFollowerConfig& config, const DriftCurve
     const double fit_x = to_join ? fin.jx : tx;
     const double fit_y = to_join ? fin.jy : ty;
     const double fit_dist = std::hypot(fit_x - from.x, fit_y - from.y);
-    const double ux = std::cos(approach);
-    const double uy = std::sin(approach);
+    const double ux = mathutil::heading_cos(approach);
+    const double uy = mathutil::heading_sin(approach);
     const double lat = (from.x - tx) * (-uy) + (from.y - ty) * ux;
     // A curve shorter than the lookahead is capped near 10/L and the yaw
     // command runs away. Being past the target, or beside the finish, has
@@ -499,7 +498,7 @@ int DriftFollower::buildPlan(const DriftFollowerConfig& config, const DriftCurve
     const bool off_finish = fin.on_line && std::fabs(lat) > kOnAxisM;
     const bool short_curve = fit_dist < kHermiteLookMin;
     if (fin.past || off_finish || short_curve) {
-        const double phi = std::atan2(ty - from.y, tx - from.x);
+        const double phi = mathutil::direction_heading(tx - from.x, ty - from.y);
         sampleStraight(out, n, kCap, from.x, from.y, tx, ty, phi);
         return n;
     }
@@ -703,8 +702,8 @@ DriftFollower::Proj DriftFollower::projectAt(const Sample* samp, int n, double r
         } else if (t > 1.0) {
             const double over = (t - 1.0) * seg;
             phi = b.phi;
-            px = b.x + std::cos(phi) * over;
-            py = b.y + std::sin(phi) * over;
+            px = b.x + mathutil::heading_cos(phi) * over;
+            py = b.y + mathutil::heading_sin(phi) * over;
             s = b.s + over;
             kappa = b.kappa;
             dk = b.dk_ds;
@@ -712,8 +711,8 @@ DriftFollower::Proj DriftFollower::projectAt(const Sample* samp, int n, double r
         } else {
             const double before = t * seg;
             phi = a.phi;
-            px = a.x + std::cos(phi) * before;
-            py = a.y + std::sin(phi) * before;
+            px = a.x + mathutil::heading_cos(phi) * before;
+            py = a.y + mathutil::heading_sin(phi) * before;
             s = a.s + before;
             kappa = a.kappa;
             dk = a.dk_ds;
@@ -736,8 +735,8 @@ DriftFollower::Proj DriftFollower::projectAt(const Sample* samp, int n, double r
             best.remaining = s;
             best.drive = (a.drive < 0.0) ? -1.0 : 1.0;
             best.v = v;
-            const double nx = -std::sin(phi);
-            const double ny = std::cos(phi);
+            const double nx = -mathutil::heading_sin(phi);
+            const double ny = mathutil::heading_cos(phi);
             best.lat = ex * nx + ey * ny;
         }
     }
@@ -769,10 +768,9 @@ ChassisCommand DriftFollower::commandGoalTurn(const StateEstimate& state,
     const bool in_window = std::fabs(error) <= tol
         && std::fabs(w_now) <= GoalAlign::TURN_SETTLE_RAD_S;
 
-    // Press stays on through the settle window so the bumper is still loaded
-    // when the next leg takes the chassis. Yaw follows the brake curve, and
-    // a spin that is already faster than that curve is braked the other way.
-    double surge = GoalAlign::TURN_SURGE_V;
+    // The press stays on through the settle window so the bumper is still
+    // loaded when the next leg takes the chassis. Yaw is a rate on the
+    // brake curve, and a spin already faster than that curve is braked.
     double yaw = 0.0;
     if (!in_window) {
         const bool overspeed = std::fabs(w_now) > std::fabs(w_ideal) + GoalAlign::VEL_DEADBAND
@@ -781,9 +779,9 @@ ChassisCommand DriftFollower::commandGoalTurn(const StateEstimate& state,
         if (overspeed) {
             const double excess = std::fabs(w_now) - std::fabs(w_ideal);
             const double brake = std::min(1.0, excess / w_cap);
-            yaw = -mathutil::sign(w_now) * brake * GoalAlign::TURN_YAW_V;
+            yaw = -mathutil::sign(w_now) * brake * GoalAlign::TURN_YAW_RAD_S;
         } else if (w_cap > 1e-6) {
-            yaw = mathutil::sign(error) * (w_mag / w_cap) * GoalAlign::TURN_YAW_V;
+            yaw = mathutil::sign(error) * w_mag;
         }
     }
 
@@ -792,17 +790,12 @@ ChassisCommand DriftFollower::commandGoalTurn(const StateEstimate& state,
     const double small_s = Boomerang::Lateral.small_ms / 1000.0;
     settled_ = small_held_ >= small_s;
     a_actual_lat_ = 0.0;
-
-    const double max_v = config.max_volts;
-    const double used = std::fabs(surge) + std::fabs(yaw);
-    if (used > max_v && used > 1e-9) {
-        const double scale = max_v / used;
-        surge *= scale;
-        yaw *= scale;
-    }
+    if (settled_) stuck_watch_.reset();
+    else stuck_watch_.update(false, !in_window, state.v_lin, state.v_ang);
 
     ChassisCommand cmd;
-    cmd.linear = surge;
+    cmd.request = DriveRequest::Motion;
+    cmd.linear = GoalAlign::TURN_SURGE_MPS;
     cmd.lateral = 0.0;
     cmd.angular = yaw;
     cmd.brake = false;
@@ -810,8 +803,8 @@ ChassisCommand DriftFollower::commandGoalTurn(const StateEstimate& state,
 }
 
 ChassisCommand DriftFollower::compute(const StateEstimate& state) {
-    const DriftCurveTarget target = targetInMeters(this->target);
-    const Pose2d pose = poseInchesToMeters(state.pose);
+    DriftCurveTarget target = targetInMeters(this->target);
+    Pose2d pose = poseInchesToMeters(state.pose);
     if (target.turn_on_goal) {
         if (!planned_) {
             count_ = buildPlan(config, target, pose, state.v_lin, state.v_ang, samples_,
@@ -829,6 +822,10 @@ ChassisCommand DriftFollower::compute(const StateEstimate& state) {
         }
         return commandGoalTurn(state, target);
     }
+    // Localization publishes the tracking centre. The plan is the yaw centre.
+    // An orbit converts that point itself.
+    pose = tracking::centerFromTracking(pose);
+    target = rotationTarget(target);
     if (!planned_) {
         count_ = buildPlan(config, target, pose, state.v_lin, state.v_ang, samples_,
                            &finish_m_);
@@ -960,17 +957,17 @@ ChassisCommand DriftFollower::compute(const StateEstimate& state) {
     const bool close = dist < config.close_m;
     const double settle_m = config.settle_in * kMetersPerInch;
     const double along_exit =
-        (tx - rx) * std::cos(target.exit_direction) +
-        (ty - ry) * std::sin(target.exit_direction);
+        (tx - rx) * mathutil::heading_cos(target.exit_direction) +
+        (ty - ry) * mathutil::heading_sin(target.exit_direction);
     // Square up only when the exit heading still points at the target.
     // A sideways miss is driven along the chord first; aiming the nose at
     // the exit heading there commands speed away from the point.
     const bool exit_closes = dist < settle_m || along_exit > 0.5 * dist;
     const bool stop_settle = close && v_end < 1e-3 && exit_closes;
 
-    const double vx = state.v_lin * std::cos(theta);
-    const double vy = state.v_lin * std::sin(theta);
-    const double v_lat = vx * (-std::sin(phi)) + vy * std::cos(phi);
+    const double vx = state.v_lin * mathutil::heading_cos(theta);
+    const double vy = state.v_lin * mathutil::heading_sin(theta);
+    const double v_lat = vx * (-mathutil::heading_sin(phi)) + vy * mathutil::heading_cos(phi);
 
     double sigma = 0.0;
     double sigma_dot = 0.0;
@@ -1035,15 +1032,35 @@ ChassisCommand DriftFollower::compute(const StateEstimate& state) {
     sigma_dot = mathutil::clamp_val(sigma_dot, -Robot::MAX_VEL_ANG, Robot::MAX_VEL_ANG);
     sigma_ddot = mathutil::clamp_val(sigma_ddot, -Physics::MAX_ACCEL_ANG, Physics::MAX_ACCEL_ANG);
 
+    // A reversal is a stop in the middle of the path. Later stations speed
+    // up again, so that zero is not the end of the leg.
+    bool path_resumes = false;
+    if (v_path >= 0.0 && v_path <= config.settle_speed && track_n >= 2) {
+        const double s_now = track[track_n - 1].s - length_m;
+        for (int i = 0; i < track_n; ++i) {
+            if (track[i].s <= s_now + 1e-3) continue;
+            if (track[i].v > config.settle_speed) {
+                path_resumes = true;
+                break;
+            }
+        }
+    }
+    const bool measured_stop_now = std::fabs(state.v_lin) <= config.settle_speed;
+    const bool stop_leg = std::fabs(v_end) <= config.settle_speed && !target.ignore_direction;
+    // A stop that is about to end aims at the exit heading and stays open
+    // until the nose gets there. stop_settle already covers the last inches.
+    const bool face_exit = stop_leg && (stop_settle
+        || (measured_stop_now && !path_resumes && saw_motion_));
+
     double psi = mathutil::normalize_angle(phi + sigma);
     if (drive < 0.0) psi = mathutil::normalize_angle(psi + Robot::PI);
-    if (stop_settle && !target.ignore_direction) psi = nose;
+    if (face_exit || (stop_settle && !target.ignore_direction)) psi = nose;
     if (stop_settle && target.ignore_direction) psi = theta;
     goal_heading_ = psi;
 
     double omega_ff = v_ref * kappa + sigma_dot;
     double alpha_ff = a_travel * kappa + v_ref * v_ref * dk + sigma_ddot;
-    if (stop_settle) {
+    if (stop_settle || face_exit) {
         omega_ff = 0.0;
         alpha_ff = 0.0;
     }
@@ -1069,26 +1086,15 @@ ChassisCommand DriftFollower::compute(const StateEstimate& state) {
 
     const double v_cmd = v_cmd_slew;
     const double a_cmd = a_cmd_slew;
-    double radius = config.turn_radius_max;
-    if (std::fabs(kappa) > config.kappa_eps) radius = 1.0 / std::fabs(kappa);
-    if (radius > config.turn_radius_max) radius = config.turn_radius_max;
-
-    double surge = 0.0;
-    double yaw = 0.0;
-    if (model_ != nullptr) {
-        surge = model_->linearVolts(v_cmd, a_cmd, std::fabs(v_cmd), std::fabs(a_cmd),
-                                    omega_ff, radius);
-        // angularVolts is V_R − V_L. The chassis command is half of that.
-        yaw = 0.5 * model_->angularVolts(omega_ff, alpha_ff, std::fabs(v_cmd),
-                                         std::fabs(a_cmd), radius);
-    }
+    (void)model_;
 
     const double heading_deg = mathutil::normalize_angle(psi - theta) * (180.0 / Robot::PI);
-    const double scale = voltsPerPower();
-    yaw += pidTick(heading_deg,
-                   config.head_kP, config.head_kI,
-                   config.head_kD, config.head_windup,
-                   i_ang_, prev_ang_, head_primed_) * scale;
+    // LemLib power, scaled onto free yaw speed. The drive's VAS makes the volts.
+    const double yaw_per_power = Robot::MAX_VEL_ANG / Controller::FULL_SCALE;
+    double yaw_trim = pidTick(heading_deg,
+                              config.head_kP, config.head_kI,
+                              config.head_kD, config.head_windup,
+                              i_ang_, prev_ang_, head_primed_) * yaw_per_power;
     head_primed_ = true;
 
     // Positive cross-track is left of travel. Positive yaw is CCW, so the
@@ -1116,8 +1122,9 @@ ChassisCommand DriftFollower::compute(const StateEstimate& state) {
     lat_primed_ = true;
     if (!std::isfinite(de)) de = 0.0;
     if (!std::isfinite(d2e)) d2e = 0.0;
-    yaw += config.lat_kP * e_lat + config.lat_kI * i_lat_
-         + config.lat_kD * de + config.lat_kD2 * d2e;
+    yaw_trim += config.lat_kP * e_lat + config.lat_kI * i_lat_
+              + config.lat_kD * de + config.lat_kD2 * d2e;
+    omega_ff += yaw_trim;
 
     // End the leg when the chassis has stopped, or when the range to the
     // target leaves the closest point of this leg. Neither waits for the
@@ -1132,20 +1139,6 @@ ChassisCommand DriftFollower::compute(const StateEstimate& state) {
     }
     if (std::fabs(state.v_lin) > config.settle_speed) saw_motion_ = true;
 
-    // A reversal is a stop in the middle of the path. Later stations speed
-    // up again, so that zero is not the end of the leg.
-    bool path_resumes = false;
-    if (v_path >= 0.0 && v_path <= config.settle_speed && track_n >= 2) {
-        const double s_now = track[track_n - 1].s - length_m;
-        for (int i = 0; i < track_n; ++i) {
-            if (track[i].s <= s_now + 1e-3) continue;
-            if (track[i].v > config.settle_speed) {
-                path_resumes = true;
-                break;
-            }
-        }
-    }
-
     const bool closed_in = best_dist_m_ < start_dist_m_ - depart_m;
     const bool departing = closed_in && dist > best_dist_m_ + depart_m;
     const bool measured_stop = std::fabs(state.v_lin) <= config.settle_speed;
@@ -1157,49 +1150,55 @@ ChassisCommand DriftFollower::compute(const StateEstimate& state) {
     // asking for a stop on top of the target.
     const bool stopped = measured_stop && !path_resumes
         && (saw_motion_ || (profile_stop && length_m <= depart_m));
-    settled_ = stopped || departing;
-
-    const double max_v = config.max_volts;
-    surge = mathutil::clamp_val(surge, -max_v, max_v);
-    yaw = mathutil::clamp_val(yaw, -max_v, max_v);
-    // Yaw wins the rail. Shedding it to keep reverse thrust leaves a slide
-    // with nothing to point the driven wheels into, and the chassis spins out.
-    const double overturn = std::fabs(yaw) + std::fabs(surge) - max_v;
-    if (overturn > 0.0) surge -= std::copysign(overturn, surge);
+    const double head_tol = config.settle_deg * (Robot::PI / 180.0);
+    const bool heading_ok = !stop_leg
+        || std::fabs(mathutil::normalize_angle(nose - theta)) <= head_tol;
+    settled_ = (stopped && heading_ok) || departing;
+    if (settled_) {
+        stuck_watch_.reset();
+    } else {
+        const bool want_lin = std::fabs(v_cmd) > config.settle_speed;
+        const double nose = std::fabs(mathutil::normalize_angle(goal_heading_ - theta));
+        const bool want_yaw = !want_lin && nose > Motion::STUCK_YAW_ERR_RAD;
+        stuck_watch_.update(want_lin, want_yaw, state.v_lin, state.v_ang);
+    }
 
     ChassisCommand cmd;
-    cmd.linear = surge;
+    cmd.request = DriveRequest::Motion;
+    cmd.linear = std::isfinite(v_cmd) ? v_cmd : 0.0;
+    cmd.accel = std::isfinite(a_cmd) ? a_cmd : 0.0;
+    cmd.angular = std::isfinite(omega_ff) ? omega_ff : 0.0;
+    cmd.alpha = std::isfinite(alpha_ff) ? alpha_ff : 0.0;
     cmd.lateral = 0.0;
-    cmd.angular = yaw;
     cmd.brake = false;
     return cmd;
 }
 
 static int writeSamples(const DriftFollower::Sample* src, int n, Pose2d* out, int cap) {
     if (src == nullptr || out == nullptr || n < 2 || cap < 2) return 0;
+    // Samples are the rotation centre, the point compute() tracks.
+    auto write = [&](int i, int idx) {
+        out[i].x = metersToInches(src[idx].x);
+        out[i].y = metersToInches(src[idx].y);
+        out[i].theta = mathutil::normalize_angle(src[idx].phi);
+    };
     if (n > cap) {
         const int last = n - 1;
-        for (int i = 0; i < cap; ++i) {
-            const int idx = (i * last) / (cap - 1);
-            out[i].x = metersToInches(src[idx].x);
-            out[i].y = metersToInches(src[idx].y);
-            out[i].theta = mathutil::normalize_angle(src[idx].phi);
-        }
+        for (int i = 0; i < cap; ++i) write(i, (i * last) / (cap - 1));
         return cap;
     }
-    for (int i = 0; i < n; ++i) {
-        out[i].x = metersToInches(src[i].x);
-        out[i].y = metersToInches(src[i].y);
-        out[i].theta = mathutil::normalize_angle(src[i].phi);
-    }
+    for (int i = 0; i < n; ++i) write(i, i);
     return n;
 }
 
 int DriftFollower::sampleBase(const Pose2d& from, Pose2d* out, int cap,
                               double v_lin, double v_ang) const {
     if (out == nullptr || cap < 2) return 0;
-    const DriftCurveTarget target = targetInMeters(this->target);
-    const Pose2d from_m = poseInchesToMeters(from);
+    const DriftCurveTarget raw = targetInMeters(this->target);
+    const DriftCurveTarget target = rotationTarget(raw);
+    Pose2d from_m = poseInchesToMeters(from);
+    if (!raw.turn_on_goal && raw.point == CommandPoint::Tracking)
+        from_m = tracking::centerFromTracking(from_m);
     Sample local[kCap];
     const Sample* src = samples_;
     int n = count_;
@@ -1213,8 +1212,11 @@ int DriftFollower::sampleBase(const Pose2d& from, Pose2d* out, int cap,
 int DriftFollower::samplePath(const Pose2d& from, Pose2d* out, int cap,
                               double v_lin, double v_ang) const {
     if (out == nullptr || cap < 2) return 0;
-    const DriftCurveTarget target = targetInMeters(this->target);
-    const Pose2d from_m = poseInchesToMeters(from);
+    const DriftCurveTarget raw = targetInMeters(this->target);
+    const DriftCurveTarget target = rotationTarget(raw);
+    Pose2d from_m = poseInchesToMeters(from);
+    if (!raw.turn_on_goal && raw.point == CommandPoint::Tracking)
+        from_m = tracking::centerFromTracking(from_m);
     Sample local[kCap];
     Sample adjusted[kCap];
     const Sample* src = samples_;

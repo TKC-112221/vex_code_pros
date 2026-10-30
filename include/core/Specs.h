@@ -19,6 +19,10 @@ namespace Robot {
         // pushes on its corners. Width is the track, so a corner sits on a
         // wheel centerline rather than outboard of the wheel.
         constexpr double BODY_LENGTH_M     = 0.38;
+        // Localization reports the middle of the front edge. Wheel travel and
+        // the bumper rectangle are measured at the geometric center, this far
+        // behind that point.
+        constexpr double TRACKING_FORWARD_M = BODY_LENGTH_M * 0.5;
     }
 
     namespace Drive {
@@ -28,12 +32,14 @@ namespace Robot {
 
     constexpr double ODOM_IMU_WEIGHT = 1.0;
 
-    // Four outward-facing distance sensors. Chassis frame: x forward, y left,
-    // yaw CCW from forward. D1 front, D2 right, D3 rear, D4 left.
-    // Edit MOUNT when the sensors move on the robot. Field walls are the
-    // perimeter of a 12 ft square. The origin is the center of the bottom
-    // edge: +x toward the right wall, +y toward the far wall. Heading is
-    // unchanged, 0 along +x and counterclockwise positive.
+    // Four outward-facing distance sensors. D1 front, D2 right, D3 rear,
+    // D4 left. TRACKING_OFFSET is where each sensor sits relative to the
+    // tracking centre (the middle of the front bumper): x forward of that
+    // point, y to its left, yaw CCW from forward. Edit that table when a
+    // sensor moves. Field walls are the perimeter of a 12 ft square. The
+    // origin is the center of the bottom edge: +x toward the right wall,
+    // +y toward the far wall. Heading is unchanged, 0 along +y and
+    // counterclockwise positive.
     //
     // VEX publishes the accuracy as about ±15 mm below 200 mm and ±5% above
     // that, over 20–2000 mm (VEXcode distance-sensor API and the V5 knowledge
@@ -64,12 +70,22 @@ namespace Robot {
         constexpr int CONF_NEAR = 10;
         constexpr double UPDATE_SEC = 0.033;
         struct Mount { double x; double y; double yaw; };
-        constexpr Mount MOUNT[COUNT] = {
-            { 0.16,  0.00,  0.0 },       // D1 front
-            { 0.00, -0.14, -PI / 2.0 },  // D2 right
-            {-0.16,  0.00,  PI },        // D3 rear
-            { 0.00,  0.14,  PI / 2.0 },  // D4 left
+        // From the tracking centre. These match the old center-frame mounts
+        // (0.16, 0), (0, -0.14), (-0.16, 0), (0, 0.14) shifted back by
+        // Chassis::TRACKING_FORWARD_M.
+        constexpr Mount TRACKING_OFFSET[COUNT] = {
+            {-0.03,  0.00,  0.0 },        // D1 front
+            {-0.17, -0.13, -PI / 2.0 },   // D2 right
+            {-0.47,  0.00,  PI },         // D3 rear
+            {-0.19,  0.14,  PI / 2.0 },   // D4 left
         };
+        // Same point in the geometric-center frame. Wheel travel is measured
+        // there, so a yaw lever uses this rather than TRACKING_OFFSET.
+        inline Mount centerOffset(int index) {
+            Mount m = TRACKING_OFFSET[index];
+            m.x += Chassis::TRACKING_FORWARD_M;
+            return m;
+        }
     }
 
     // Keep a pose center inside the field, inset_m in from each wall.

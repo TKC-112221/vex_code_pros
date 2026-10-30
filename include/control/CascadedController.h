@@ -3,10 +3,10 @@
  * CascadedController  --  v1's adaptive follower, re-expressed as an IController.
  *
  * Pipeline: reference warp -> (Ramsete OR position-PID) pose correction ->
- * injected feedforward (or recorded-volt feedforward) -> velocity PID feedback.
- * The controller carries an internal EKF purely to smooth measured velocity and
- * the command-derivative used for feedforward and the PID D-term, exactly as in
- * v1. Its output is a chassis-frame effort; the DriveBase mixes to actuators.
+ * injected feedforward. Recorded-volt replay still emits voltage. Every
+ * other path emits the velocity command, and the drive base's VAS model
+ * makes the volts. The controller carries an internal EKF purely to smooth
+ * measured velocity and the command derivative, exactly as in v1.
  * ------------------------------------------------------------------------- */
 
 #include "interfaces/IController.h"

@@ -22,6 +22,9 @@ class IFeedForward;
 // raw_sticks: joystick before the drive curve, for the stick-abort deadband
 // mode      : current robot mode
 // model     : chassis feedforward used by an override that needs one
+// motion    : when set, this control vector replaces the stick command.
+//             A routine passes the vector it just calculated. Null leaves
+//             the stick path, including the drift curve and the goal lock.
 // Returns possibly-overridden commands and buttons.
 OverrideResult userInputOverride(const ChassisObservation& sensor,
                                  const CommandVector& commands,
@@ -30,7 +33,8 @@ OverrideResult userInputOverride(const ChassisObservation& sensor,
                                  const Pose2d& body,
                                  const JoystickData& raw_sticks,
                                  RobotMode mode,
-                                 const IFeedForward* model);
+                                 const IFeedForward* model,
+                                 const CommandVector* motion = nullptr);
 
 // Polyline of whichever override is running, for the field window.
 // Returns 0 when none is. v_lin and v_ang are the measured momentum

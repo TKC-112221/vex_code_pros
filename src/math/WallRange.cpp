@@ -14,15 +14,15 @@ struct Beam {
 };
 
 Beam beamAt(const Pose2d& pose, int sensor_index) {
-    const Robot::Range::Mount& mount = Robot::Range::MOUNT[sensor_index];
-    const double c = std::cos(pose.theta);
-    const double s = std::sin(pose.theta);
+    const Robot::Range::Mount mount = Robot::Range::TRACKING_OFFSET[sensor_index];
+    const double c = mathutil::heading_cos(pose.theta);
+    const double s = mathutil::heading_sin(pose.theta);
     const double a = pose.theta + mount.yaw;
     Beam b;
     b.ox = pose.x + mount.x * c - mount.y * s;
     b.oy = pose.y + mount.x * s + mount.y * c;
-    b.dx = std::cos(a);
-    b.dy = std::sin(a);
+    b.dx = mathutil::heading_cos(a);
+    b.dy = mathutil::heading_sin(a);
     b.dsx_dth = -mount.x * s - mount.y * c;
     b.dsy_dth =  mount.x * c - mount.y * s;
     return b;
@@ -178,8 +178,8 @@ RangeSolve solveRanges(double theta, const DistanceReading* distance, int count)
     for (int i = 0; i < count; ++i) if (distance[i].valid) ++nvalid;
     if (nvalid < 2) return none;
 
-    const double c = std::cos(theta);
-    const double s = std::sin(theta);
+    const double c = mathutil::heading_cos(theta);
+    const double s = mathutil::heading_sin(theta);
     const double x_lo = Robot::Range::FIELD_X_MIN_M;
     const double x_hi = Robot::Range::FIELD_X_MAX_M;
     const double y_lo = Robot::Range::FIELD_Y_MIN_M;
@@ -188,10 +188,10 @@ RangeSolve solveRanges(double theta, const DistanceReading* distance, int count)
     int nx = 0, ny = 0;
     for (int i = 0; i < count; ++i) {
         if (!distance[i].valid) continue;
-        const Robot::Range::Mount& mount = Robot::Range::MOUNT[i];
+        const Robot::Range::Mount mount = Robot::Range::TRACKING_OFFSET[i];
         const double a = theta + mount.yaw;
-        const double dx = std::cos(a);
-        const double dy = std::sin(a);
+        const double dx = mathutil::heading_cos(a);
+        const double dy = mathutil::heading_sin(a);
         const double rx = mount.x * c - mount.y * s;
         const double ry = mount.x * s + mount.y * c;
         if (std::fabs(dx) >= std::fabs(dy)) {
@@ -243,7 +243,10 @@ bool nudgePosition(double& x, double& y, double theta,
         beams[i].inv_var = 1.0 / (sigma * sigma);
         ++nvalid;
     }
-    if (nvalid == 0) return false;
+    // Two beams, same rule as solveRanges. One return cannot name a point,
+    // and the odometry nudge used to follow it anyway. A disconnected set
+    // is ignored; a single survivor is too.
+    if (nvalid < 2) return false;
 
     // Beams that agree with each other. Dropping one blocked return lets the
     // rest name a pose; the odometry state can still sit far from that pose.
@@ -315,7 +318,8 @@ bool nudgePosition(double& x, double& y, double theta,
     x += dx;
     y += dy;
 
-    Robot::clampFieldMeters(x, y, 0.18);
+    // x/y are the tracking centre, which can sit on the perimeter.
+    Robot::clampFieldMeters(x, y, 0.0);
     return true;
 }
 

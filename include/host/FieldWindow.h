@@ -31,6 +31,33 @@ void setFollowPath(const Pose2d* points, int count, bool active);
 // clears it so the panel shows LLEMU text again.
 void setBrainFrame(const std::uint32_t* rgb, int width, int height);
 
+// Domain randomization for the host plant. The dropdown on the field
+// starts at the compiled plant, which is what the controller was tuned to.
+// Each slider puts back its own compiled value. Reset plant puts them all back.
+// Friction is volts removed before that axis moves. The velocity and
+// acceleration scales are 1 on the compiled plant: velocity scales the
+// settled speed, acceleration scales how fast that speed is approached.
+// A disconnected port reports nothing. Distance stays invalid. The IMU
+// holds the last heading and reports no rate. A wheel bank reports no
+// travel. Reset plant connects every sensor again.
+struct PlantOverride {
+    double velocity_tau_sec = 0;
+    double skid_tau_sec = 0;
+    double speed_scale = 0;
+    int voltage_delay_ticks = 0;
+    double lin_friction_v = 0;
+    double lin_vel_scale = 1;
+    double lin_accel_scale = 1;
+    double ang_friction_v = 0;
+    double ang_vel_scale = 1;
+    double ang_accel_scale = 1;
+    bool imu_off = false;
+    bool enc_left_off = false;
+    bool enc_right_off = false;
+    bool distance_off[kDistanceChannels] = {};
+};
+PlantOverride plantOverride();
+
 // Live mechanism state for the side panel. cascade_frac is 0 at the bottom
 // stop and 1 at the top. score_phase is copied. nullptr reads as Idle.
 void setMechanisms(const SubsystemCommand& cmd, double cascade_frac,

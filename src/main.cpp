@@ -24,6 +24,7 @@
 #include "core/Types.h"
 #include "core/Specs.h"
 #include "core/Tuning.h"
+#include "field/FieldPoints.h"
 #include "config/Settings.h"
 #include "control/DrivePolicy.h"
 
@@ -50,6 +51,7 @@
 #include "estimators/LocalizationOverride.h"
 #include "math/MathUtils.h"
 #include "estimators/OdometryEstimator.h"
+#include "math/TrackingCenter.h"
 #include "estimators/ParticleFilterEstimator.h"
 #include "estimators/SlipEnsembleEstimator.h"
 #include "control/CascadedController.h"
@@ -69,6 +71,7 @@
 #include "curves/CubicDriveCurve.h"
 #include "curves/LinearDriveCurve.h"
 #include "logic/SubsystemControl.h"
+#include "logic/MatchLoader.h"
 #include "control/StaticMotionLimiter.h"
 #include "platform/FramePlayer.h"
 #include "auton/AutonCatalog.h"
@@ -77,6 +80,7 @@
 #include "auton/Mechanisms.h"
 
 #include <atomic>
+#include <cstdio>
 
 // ============================ WIRING ======================================
 // Swap g_feedforward for a VASController(kS, kV, kA, kS_ang, kV_ang, kA_ang)
@@ -170,17 +174,53 @@ static bool fieldAutonomous() {
 #endif
 }
 
+// Drop the plant, the IMU, and the estimator, then bring both back at the
+// routine's start. The pose is the front middle, the same point the field
+// and the follower use. The host stores the geometric center, half a body
+// length behind that point, and rearms the sensors so the next sample is
+// travel from here rather than from the pose that was left behind.
+static void placeAtStart(Pose2d pose) {
+    drive->stop();
+#if defined(ROBOT_HOST)
+    const Pose2d center = poseMetersToInches(
+        tracking::centerFromTracking(poseInchesToMeters(pose)));
+    g_hardware.setPlant(center.x, center.y, pose.theta, 0.0, 0.0, 0.0);
+    g_hardware.armLocalization(0);
+    const MockDrive::PlantSnapshot plant = g_hardware.plantSnapshot();
+    pose = poseMetersToInches(tracking::trackingFromCenter(
+        poseInchesToMeters(Pose2d{plant.x_in, plant.y_in, plant.theta})));
+#else
+    drive->alignHeadingTo(pose.theta);
+#endif
+    resetSensorFilters();
+    command_processor->reset();
+
+    g_loc_mutex.take();
+    estimator->reset();
+    estimator->overridePose(pose);
+    estimator->clearVelocity();
+    g_imu_delta.reset();
+    g_prev_heading = pose.theta;
+    g_obs_pending = false;
+    g_loc_mutex.give();
+}
+
 // Command routines and recorded replay. stopSkills() is the abort path:
 // it drops the queue and releases the mechanisms the routine owned.
 // An in-progress recording is left alone; the command branch keeps appending.
-static void startSkills() {
-    std::unique_ptr<auton::Command> routine = auton::buildSelected(feedforward);
-    if (!routine) return;
+// True when the routine named a start pose and the robot was placed there.
+// The caller refreshes its pose snapshot so the first leg plans from there.
+static bool startSkills() {
+    auton::BuiltAuton built = auton::buildSelected(feedforward);
+    if (!built.command) return false;
+    Field::resetGoalHeights();
     g_drift_curve_abort = true;
     g_scheduler.cancel();
     auton::robotMechanisms().reset();
-    g_scheduler.add(std::move(routine));
+    if (built.has_start) placeAtStart(built.start);
+    g_scheduler.add(std::move(built.command));
     g_mode = RobotMode::COMMAND;
+    return built.has_start;
 }
 
 static void stopSkills() {
@@ -207,6 +247,7 @@ static void releaseField() {
 
 static void startReplay() {
     if (trajectory->getFrameCount() == 0) trajectory->loadFromHeader();
+    cancelMatchLoader();
     g_recording = false;
     g_mode = RobotMode::REPLAYING;
     trajectory->resetPlayback();
@@ -229,7 +270,8 @@ static Pose2d goalAlignBodyPose(const Pose2d& estimate) {
     const MockDrive::PlantSnapshot plant = g_hardware.plantSnapshot();
     return Pose2d{plant.x_in, plant.y_in, plant.theta};
 #else
-    return estimate;
+    // The touch test wants the geometric center. The estimate is the front.
+    return poseMetersToInches(tracking::centerFromTracking(poseInchesToMeters(estimate)));
 #endif
 }
 
@@ -247,16 +289,13 @@ static double snapshotTotalHeading() {
     return h;
 }
 
-// One midpoint step, the same integration Odometry::update applies.
+// One step of Odometry::update. Deltas are the geometric center's travel
+// and the pose is the front middle.
 static Pose2d advancePose(Pose2d pose, double forward, double strafe, double heading) {
-    const double d_theta = mathutil::normalize_angle(heading - pose.theta);
-    const double mid = pose.theta + d_theta * 0.5;
-    const double c = std::cos(mid);
-    const double s = std::sin(mid);
-    pose.x += forward * c - strafe * s;
-    pose.y += forward * s + strafe * c;
-    pose.theta = heading;
-    return pose;
+    Odometry step;
+    step.setPose(pose);
+    step.update(forward, strafe, heading);
+    return step.pose;
 }
 
 // Publish one sensor dict for the localization task. Forward travel is the
@@ -268,12 +307,14 @@ static void publishSensors(SensorDict sensors, ChassisObservation* inertial_out 
     const double v_fwd = g_imu_delta.forwardVelocity();
     const double v_lat = g_imu_delta.lateralVelocity();
     const double yaw = sensors.chassis.v_ang;
+    double dt = sensors.chassis.sample_dt;
+    if (!(dt >= 0.001) || dt > 0.2) dt = System::DT_SEC;
+    const double v_wheel = (dt > 0.0) ? sensors.chassis.forward_delta / dt : v_fwd;
     LocalizationCue cue;
     cue.front_speed = std::hypot(v_fwd, v_lat + yaw * (Robot::Chassis::BODY_LENGTH_M * 0.5));
     cue.ax_g = sensors.chassis.imu_accel_x;
     cue.accel_g = std::hypot(cue.ax_g, sensors.chassis.imu_accel_y);
-    double dt = sensors.chassis.sample_dt;
-    if (!(dt >= 0.001) || dt > 0.2) dt = System::DT_SEC;
+    cue.surprise_g = g_imu_delta.surpriseG(v_wheel, yaw, cue.ax_g, sensors.chassis.imu_accel_y, dt);
     g_imu_delta.apply(sensors.chassis, dt);
     g_loc_mutex.take();
     const Pose2d pose = poseInchesToMeters(estimator->getState().pose);
@@ -424,6 +465,7 @@ void robot_pipeline() {
         if (ui->checkLoadRequested(reading.buttons, g_mode)) trajectory->loadFromHeader();
         if (ui->checkCalibrationRequested(reading.buttons) && g_input_enabled.load()) {
             g_drift_curve_abort = true;
+            cancelMatchLoader();
             if (g_mode == RobotMode::COMMAND) {
                 g_mode = modeAfterRoutine();
                 stopSkills();
@@ -439,8 +481,9 @@ void robot_pipeline() {
         // Y runs whichever routine competition autonomous() runs.
         if (ui->checkAutonTestRequested(reading.buttons)) {
             g_drift_curve_abort = true;
-            if (Settings::Auton::USE_COMMAND_SCHEDULER) startSkills();
-            else startReplay();
+            if (Settings::Auton::USE_COMMAND_SCHEDULER) {
+                if (startSkills()) est = snapshotEstimate();
+            } else startReplay();
         }
 
         // --- 3. SAFETY ABORT (replay) ---
@@ -478,21 +521,44 @@ void robot_pipeline() {
                 }
                 g_mode = modeAfterRoutine();
             } else {
+                g_scheduler.pauseMotion(macroOwnsDrive());
                 const auton::SchedulerOutput step = g_scheduler.run(est);
                 sub_cmd = auton::robotMechanisms().periodic();
                 sub_cmd.raw_bitmask = intentBitmask(auton::robotMechanisms().intent());
-                sub_cmd = applySubsystemCommand(*drive, *macros, sub_cmd,
-                                                reading.buttons, pros::millis());
+                const GoalScoreOutput act = applySubsystemCommand(
+                    *drive, *macros, sub_cmd, reading.buttons, body, est,
+                    reading.sensors.d1(), pros::millis(), feedforward);
+                sub_cmd = act.command;
+                // The loader closes the claw only on the command it publishes.
+                // Without this, the stored solenoid is still the last score's
+                // release, and the claw opens again when the backup ends.
+                // The score opens it later, once the latch drive is done and
+                // the cascade has lowered, just before that backup.
+                auton::robotMechanisms().pneumatics.setG(sub_cmd.pneumatics_g_state);
+                auton::robotMechanisms().pneumatics.setB(sub_cmd.pneumatics_b_state);
                 CommandVector commanded{};
                 ChassisCommand applied{};
                 if (!step.running) {
                     drive->stop();
                     g_mode = modeAfterRoutine();
-                } else if (step.has_drive) {
-                    commanded = CommandVector::fromChassis(step.drive);
-                    applied = drive->applyDrive(step.drive, reading.sensors.chassis);
                 } else {
-                    drive->stop();
+                    // The routine's control vector overrides the sticks.
+                    // applyDrive, in the drive base, is what makes voltage.
+                    const CommandVector* motion = nullptr;
+                    CommandVector owned;
+                    if (act.drive_active) {
+                        owned = CommandVector::fromChassis(act.drive);
+                        motion = &owned;
+                    } else if (step.has_drive) {
+                        owned = CommandVector::fromChassis(step.drive);
+                        motion = &owned;
+                    }
+                    const OverrideResult over = userInputOverride(
+                        reading.sensors.chassis, {}, reading.buttons, est, body,
+                        reading.joystick, g_mode, feedforward, motion);
+                    commanded = over.commands;
+                    if (motion == nullptr) drive->stop();
+                    else applied = drive->applyDrive(commanded.toChassis(), reading.sensors.chassis);
                 }
                 if (g_recording) {
                     trajectory->recordFrame(est.pose, commanded, applied, sub_cmd,
@@ -525,8 +591,15 @@ void robot_pipeline() {
 
             drive_cmd = processed.toChassis();
 
-            // Cascade, intake, claw, and the scoring macro.
-            sub_cmd = controlSubsystems(*drive, *macros, reading, processed, pros::millis());
+            // Cascade, intake, claw, and the goal-score macro. The macro
+            // replaces the stick command while it owns the chassis.
+            const GoalScoreOutput act = controlSubsystems(
+                *drive, *macros, reading, processed, body, est, pros::millis(), feedforward);
+            sub_cmd = act.command;
+            if (act.drive_active) {
+                drive_cmd = act.drive;
+                processed = CommandVector::fromChassis(act.drive);
+            }
 
             // Actuate chassis from the processed command vector
             ChassisCommand applied = drive->applyDrive(drive_cmd, reading.sensors.chassis);
@@ -552,8 +625,10 @@ void robot_pipeline() {
         particle_count = estimator->sampleParticles(particles, 50);
         g_loc_mutex.give();
         Pose2d curve[64];
-        // The latched goal arc is drawn over the routine and the drift curve.
-        int curve_n = goalAlignPath(body, curve, 64);
+        // The loader path and the latched goal arc are drawn over the
+        // routine and the drift curve.
+        int curve_n = matchLoaderPath(estimate.pose, curve, 64);
+        if (curve_n < 2) curve_n = goalAlignPath(body, curve, 64);
         if (curve_n < 2) {
             curve_n = (g_mode == RobotMode::COMMAND)
                 ? g_scheduler.samplePath(estimate.pose, curve, 64, estimate.v_lin, estimate.v_ang)
@@ -591,18 +666,36 @@ static void imuCalTask() {
 }
 
 #if !defined(ROBOT_HOST)
+#define TRACE(...)                                      \
+    do {                                                \
+        std::printf("trace: " __VA_ARGS__);             \
+        std::printf("\n");                              \
+        std::fflush(stdout);                            \
+    } while (0)
+
 // Selector and route preview. Started after the splash so it is the next
 // owner of the brain display, and kept off the control tick so a fit cannot
 // freeze the sticks. Controller text is flushed here for the same reason.
+// The first two passes are traced. The last line printed is the step that
+// has not returned.
 static void brain_ui_task(void*) {
+    TRACE("brain-ui enter");
+    int pass = 0;
     while (true) {
+        const bool talk = pass < 2;
+        if (talk) TRACE("brain controller");
         g_ui.serviceController();
+        if (talk) TRACE("brain controller done");
+        if (talk) TRACE("brain selector");
         auton::serviceBrainSelector(g_ui.brainUpdates());
+        if (talk) TRACE("brain selector done");
+        if (talk) ++pass;
         pros::delay(20);
     }
 }
 
 static void splashThenUi(void*) {
+    TRACE("splash task");
     if (Settings::Splash::ENABLED) {
         playFrameSequence({
             Settings::Splash::PATH_FORMAT,
@@ -611,11 +704,18 @@ static void splashThenUi(void*) {
             Settings::Splash::FRAME_STEP,
             Settings::Splash::FPS,
         });
+        TRACE("splash returned");
     }
+    TRACE("brain updates on");
     g_ui.setBrainUpdates(true);
+    TRACE("brain updates set");
+    TRACE("brain-ui create");
     g_brain_ui = new pros::Task(brain_ui_task, nullptr, TASK_PRIORITY_DEFAULT - 1,
                                 kWorkerStack, "brain-ui");
+    TRACE("brain-ui created");
+    TRACE("splash task exit");
 }
+#undef TRACE
 #endif
 
 void initialize() {
@@ -688,6 +788,7 @@ void opcontrol() {
     g_mode = RobotMode::IDLE;
     g_recording = false;
     g_drift_curve_abort = true;
+    cancelMatchLoader();
     g_scheduler.cancel();
     while (!fieldDisabled() && !fieldAutonomous()) pros::delay(10);
 }

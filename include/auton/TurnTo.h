@@ -9,10 +9,13 @@
  * The leg is a TurnToHeading. The robot yaws where it stands; it does not
  * chase a path. afterTurn() is a subcommand: the pivot keeps going, and the
  * action starts once this leg has swept that many radians of yaw. The pivot
- * is the deadline, so a still-running action is cancelled when the heading
- * settles and cannot hold the chassis. then() is also a subcommand, and it
- * runs after the pivot finishes, before the routine starts the next leg.
- * Several of either decorator stack, in the order they were added.
+ * is the deadline. The group keeps running while a side command is still
+ * going, and once the heading has settled it stops publishing that pivot.
+ * A gate that has not fired yet runs when the pivot arrives. A macro that
+ * takes the chassis also pauses the pivot. then() runs after that group
+ * finishes, before the routine starts the next leg. A pivot that gave up
+ * skips then(). Several of either decorator stack, in the order they were
+ * added.
  * ------------------------------------------------------------------------- */
 
 #include "auton/CommandGroups.h"
@@ -83,6 +86,16 @@ private:
         if (model) model_ = model;
     }
 
+    // Reflect this pivot across the field centerline. Call before compose().
+    // A forced direction reverses with the heading.
+    void mirror() {
+        heading_ = -heading_;
+        if (turn_.direction == TurnDirection::Clockwise)
+            turn_.direction = TurnDirection::Counterclockwise;
+        else if (turn_.direction == TurnDirection::Counterclockwise)
+            turn_.direction = TurnDirection::Clockwise;
+    }
+
     // Fold decorators into one command: yaw gates run beside the pivot,
     // and then() commands run after that group finishes.
     void compose() {
@@ -100,7 +113,7 @@ private:
             for (auto& command : after_) {
                 if (command) steps.push_back(std::move(command));
             }
-            motion = std::make_unique<SequentialCommandGroup>(std::move(steps));
+            motion = std::make_unique<SequentialCommandGroup>(std::move(steps), true);
         }
         impl_ = std::move(motion);
         composed_ = true;

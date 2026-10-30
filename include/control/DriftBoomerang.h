@@ -25,9 +25,8 @@
  * Inside close_m of the target the carrot collapses onto the target and the
  * heading target becomes the requested heading, matching LemLib's settle.
  *
- * Output is a chassis-frame effort in volts, the same units
- * TankDriveVelocityMapper writes, so the caller can replace an override
- * command with it:
+ * Output is a chassis velocity, the same units TankDriveVelocityMapper
+ * writes, so the caller can replace an override command with it:
  *
  *   static DriftBoomerang nav;
  *   out.commands = CommandVector::fromChassis(nav.compute(estimate, goal));

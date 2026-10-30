@@ -53,8 +53,8 @@ Memory& memory() {
 void bodyOffset(const Pose2d& pose, double px, double py, double& bx, double& by) {
     const double dx = px - pose.x;
     const double dy = py - pose.y;
-    const double c = std::cos(pose.theta);
-    const double s = std::sin(pose.theta);
+    const double c = mathutil::heading_cos(pose.theta);
+    const double s = mathutil::heading_sin(pose.theta);
     bx = c * dx + s * dy;
     by = -s * dx + c * dy;
 }
@@ -97,7 +97,7 @@ void fillLook(const StateEstimate& state, const DriftCurveTarget& target,
     double approach = meters.exit_direction;
     if (!std::isfinite(approach)) return;
     if (meters.ignore_direction && dist > 1e-4) {
-        approach = std::atan2(meters.y - pose.y, meters.x - pose.x);
+        approach = mathutil::direction_heading(meters.x - pose.x, meters.y - pose.y);
     }
 
     const driftpath::Finish fin = driftpath::finishOf(
@@ -125,7 +125,7 @@ void fillLook(const StateEstimate& state, const DriftCurveTarget& target,
         driftpath::quinticLook(path, DrivePolicy::kLookaheadM[0], phi, kappa);
         if (std::isfinite(phi)) path_phi = phi;
     } else if (dist > 1e-4) {
-        path_phi = std::atan2(meters.y - pose.y, meters.x - pose.x);
+        path_phi = mathutil::direction_heading(meters.x - pose.x, meters.y - pose.y);
     }
 
     for (int i = 0; i < DrivePolicy::kLookahead; ++i) {
@@ -149,8 +149,8 @@ void fillLook(const StateEstimate& state, const DriftCurveTarget& target,
                 py = end_y + (meters.y - end_y) * scale;
             }
         } else {
-            const double along = (meters.x - pose.x) * std::cos(approach)
-                               + (meters.y - pose.y) * std::sin(approach);
+            const double along = (meters.x - pose.x) * mathutil::heading_cos(approach)
+                               + (meters.y - pose.y) * mathutil::heading_sin(approach);
             if (along <= 1e-4 || distance >= along) {
                 px = meters.x;
                 py = meters.y;
@@ -189,10 +189,11 @@ void pushMemory(double v_lin, double v_sway, double v_yaw, DrivePolicy::FollowIn
 }
 
 void storeAction(const CommandVector& cmd) {
-    const double volts = System::MAX_VOLTS;
     Memory& mem = memory();
-    mem.last_surge = (volts > 1e-6) ? cmd.surge / volts : 0.0;
-    mem.last_yaw = (volts > 1e-6) ? cmd.yaw / volts : 0.0;
+    const double lin = Robot::MAX_VEL_LIN;
+    const double ang = Robot::MAX_VEL_ANG;
+    mem.last_surge = (lin > 1e-6) ? cmd.surge / lin : 0.0;
+    mem.last_yaw = (ang > 1e-6) ? cmd.yaw / ang : 0.0;
 }
 
 } // namespace
@@ -262,13 +263,13 @@ CommandVector command(const FollowInput& in) {
     float y[kOutputs] {};
     if (!network().predict(reading.features, y)) return cmd;
 
-    const double volts = System::MAX_VOLTS;
-    auto axis = [volts](float raw) {
-        return static_cast<double>(std::tanh(raw)) * volts;
+    auto axis = [](float raw) {
+        return static_cast<double>(std::tanh(raw));
     };
-    cmd.surge = axis(y[0]);
+    cmd.request = DriveRequest::Motion;
+    cmd.surge = axis(y[0]) * Robot::MAX_VEL_LIN;
     cmd.sway = 0.0;
-    cmd.yaw = axis(y[1]);
+    cmd.yaw = axis(y[1]) * Robot::MAX_VEL_ANG;
     return cmd;
 }
 
@@ -281,7 +282,7 @@ CommandVector command(const StateEstimate& state, const DriftCurveTarget& target
     in.body_heading = std::isfinite(state.pose.theta) ? state.pose.theta : 0.0;
     const double dx = state.pose.x - target.x;
     const double dy = state.pose.y - target.y;
-    in.cross_track_in = -std::sin(nose) * dx + std::cos(nose) * dy;
+    in.cross_track_in = -mathutil::heading_sin(nose) * dx + mathutil::heading_cos(nose) * dy;
     in.target_thrust = 1.0;
 
     pushMemory(v_lin, 0.0, v_ang, in);

@@ -71,6 +71,7 @@ SubsystemCommand ScoreMacro::apply(const SubsystemCommand& driver,
     SubsystemCommand out = driver;
     out.intake_pct = 0;
     out.score = true;
+    out.cascade_manual = false;
     const uint32_t elapsed = now_ms - phase_ms_;
 
     switch (phase_) {

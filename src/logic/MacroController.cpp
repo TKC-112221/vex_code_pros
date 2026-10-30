@@ -3,6 +3,7 @@
  * apply_subsystems_from_buttons, and the replay abort test.
  * ------------------------------------------------------------------------- */
 #include "logic/MacroController.h"
+#include <cstdio>
 
 bool MacroController::isAbortRequested(const ButtonState& btn) const {
     return btn.l1 && btn.l2 && btn.r1 && btn.r2;
@@ -37,6 +38,19 @@ SubsystemCommand MacroController::processSubsystems(const ButtonState& btn, uint
     // command so a recording can still be replayed by decodeRecorded.
     SubsystemCommand sub = intent_.toCommand();
     sub.raw_bitmask = bitmask;
+    sub.cascade_manual = true;
+
+    static bool prev_l1 = false, prev_l2 = false, prev_r1 = false, prev_r2 = false;
+    if (l1 != prev_l1 || l2 != prev_l2 || r1 != prev_r1 || r2 != prev_r2) {
+        prev_l1 = l1;
+        prev_l2 = l2;
+        prev_r1 = r1;
+        prev_r2 = r2;
+        std::printf("subsys: buttons L1=%d L2=%d R1=%d R2=%d -> cascade %d intake %d\n",
+                    l1 ? 1 : 0, l2 ? 1 : 0, r1 ? 1 : 0, r2 ? 1 : 0,
+                    sub.cascade_pct, sub.intake_pct);
+        std::fflush(stdout);
+    }
     return sub;
 }
 

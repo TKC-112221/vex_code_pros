@@ -3,6 +3,7 @@
 #include "config/Ports.h"
 #include "core/Specs.h"
 #include "pros/distance.hpp"
+#include "pros/error.h"
 
 DistanceReading distanceFromRaw(std::int32_t mm, std::int32_t confidence) {
     DistanceReading r;
@@ -25,14 +26,50 @@ DistanceBank::DistanceBank()
       d3_(static_cast<std::uint8_t>(Ports::D3)),
       d4_(static_cast<std::uint8_t>(Ports::D4)) {}
 
+namespace {
+// Ticks between retries of a port that failed. The control period is 10 ms,
+// so this is about half a second, and a dead port is not touched every tick.
+constexpr int kRetryTicks = 50;
+
+const std::int32_t kMinMm = static_cast<std::int32_t>(Robot::Range::MIN_M * 1000.0 + 0.5);
+const std::int32_t kMaxMm = static_cast<std::int32_t>(Robot::Range::MAX_M * 1000.0 + 0.5);
+}
+
+void DistanceBank::probe() {
+    pros::Distance* const sensor[kDistanceChannels] = { &d1_, &d2_, &d3_, &d4_ };
+    for (int i = 0; i < kDistanceChannels; ++i) {
+        online_[i] = sensor[i]->is_installed();
+        retry_[i] = 0;
+    }
+}
+
 void DistanceBank::read(DistanceReading (&out)[kDistanceChannels]) {
-    const std::int32_t mm[kDistanceChannels] = {
-        d1_.get(), d2_.get(), d3_.get(), d4_.get()
-    };
-    const std::int32_t conf[kDistanceChannels] = {
-        d1_.get_confidence(), d2_.get_confidence(), d3_.get_confidence(), d4_.get_confidence()
-    };
-    for (int i = 0; i < kDistanceChannels; ++i) out[i] = distanceFromRaw(mm[i], conf[i]);
+    pros::Distance* const sensor[kDistanceChannels] = { &d1_, &d2_, &d3_, &d4_ };
+    for (int i = 0; i < kDistanceChannels; ++i) {
+        out[i] = {};
+        if (!online_[i]) {
+            if (++retry_[i] < kRetryTicks) continue;
+            retry_[i] = 0;
+            online_[i] = sensor[i]->is_installed();
+            if (!online_[i]) continue;
+        }
+        if (!sensor[i]->is_installed()) {
+            online_[i] = false;
+            retry_[i] = 0;
+            continue;
+        }
+        const std::int32_t mm = sensor[i]->get();
+        if (mm == PROS_ERR) {
+            online_[i] = false;
+            retry_[i] = 0;
+            continue;
+        }
+        // Confidence is a second port transaction. Skip it when the range
+        // is already outside the window, including a 9999 mm no-return.
+        const std::int32_t conf = (mm >= kMinMm && mm <= kMaxMm)
+            ? sensor[i]->get_confidence() : 0;
+        out[i] = distanceFromRaw(mm, conf);
+    }
 }
 
 #if defined(_MSC_VER)

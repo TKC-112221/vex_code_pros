@@ -70,4 +70,9 @@ private:
     DistanceBank ranges_;
 
     void applyCurrentLimit(double& left_v, double& right_v, double v_lin, double v_ang) const;
+
+    // Previous velocity command, so a caller that omitted accel still gets kA.
+    double volt_surge_ = 0.0;
+    double volt_yaw_ = 0.0;
+    bool volt_primed_ = false;
 };

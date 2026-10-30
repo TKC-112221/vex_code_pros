@@ -5,7 +5,7 @@
  * This is the ONLY place in the codebase that is allowed to know how many
  * wheels/motors exist and how they are arranged. It converts:
  *   - its own encoders + IMU  --> a chassis-frame ChassisObservation  (fwd kin.)
- *   - a chassis-frame ChassisCommand --> per-actuator voltages         (inv kin.)
+ *   - a chassis-frame velocity --> per-actuator voltages         (VAS + inv kin.)
  * Everything above this interface (estimator, controller, main) is therefore
  * completely drivebase-agnostic. Descendants: TankDrive, XDrive, ...
  * ------------------------------------------------------------------------- */
@@ -24,6 +24,7 @@ public:
     // and retries once. A failed reset latches wheel-derived heading inside
     // the drive. The robot must stay still until that wait returns. Startup
     // runs the wait on another task so the control tick can keep going.
+    // Distance sensors are not part of this wait.
     virtual void beginSensorCalibration() {}
     virtual void waitSensorCalibration() {}
 

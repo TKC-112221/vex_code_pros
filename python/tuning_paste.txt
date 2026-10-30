@@ -15,7 +15,7 @@
 // Stage 2 pose cost 0.7266 on Hermite + timed elastic (pop 20, restarts 1, generations 1000).
 
 #ifndef TUNING_PASTE_PART
-#error "Include python/tuning_paste.txt with TUNING_PASTE_PART set to 1..7."
+#error "Include python/tuning_paste.txt with TUNING_PASTE_PART set to 1..9."
 #endif
 
 #if TUNING_PASTE_PART == 1
@@ -60,8 +60,19 @@ constexpr double TURN_RADIUS_MAX_M = 10.0;
 constexpr Axis Lateral = {10.0, 0.0, 3.0, 3.0, 1.0, 100.0, 3.0, 500.0, 5.0};
 constexpr Axis Angular = {0.8589493, 1.9583466, 0.035739421, 2.1843992, 1.0, 100.0, 3.0, 500.0, 0.0};
 constexpr double CLOSE_IN = 14.633193;
+#elif TUNING_PASTE_PART == 8
+// Turn  (include/core/Tuning.h)
+// Hand defaults. The next optimize_tuning.py run replaces these.
+constexpr double MAX_VEL_RAD_S = 4.0;
+constexpr double MAX_ACCEL_RAD_S2 = 6.0;
+#elif TUNING_PASTE_PART == 9
+// Segment  (include/core/Tuning.h)
+// Hand defaults. The next optimize_tuning.py run replaces these.
+constexpr double STANLEY_K = 1.5;
+constexpr double STANLEY_SOFT = 0.3;
+constexpr double PIVOT_RAD = 0.87266463;
 #else
-#error "TUNING_PASTE_PART must be 1 through 7."
+#error "TUNING_PASTE_PART must be 1 through 9."
 #endif
 
 #undef TUNING_PASTE_PART

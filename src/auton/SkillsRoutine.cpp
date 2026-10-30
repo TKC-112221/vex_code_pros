@@ -1,44 +1,58 @@
 /* ---------------------------------------------------------------------------
- * SkillsRoutine.cpp  --  example skills route.
+ * SkillsRoutine.cpp  --  skills route.
  *
- * Poses are MotionPose values: field inches, heading in degrees, and speed
- * in m/s along the nose as the fourth argument. The origin is the center of
- * the bottom edge. 0° is +X, counterclockwise positive. The robot does not
- * start from the first pose; DriftFollower plans from wherever localization
- * says it is. Calibration leaves that pose at the field center, (0, 72),
- * facing +X, and this example stays near the middle of the 12 ft field.
+ * Poses are field inches. 0° is +Y, counterclockwise positive. The robot
+ * starts at (0, 18) facing that way, and every explicit drive finishes
+ * facing it too. Each of those drives is a segment path. A negative speed
+ * backs up along the nose; the magnitude is the exit speed, so a near-zero
+ * value stops.
  *
- *   (0, 72) --fly-by--> (30, 72) facing 0° --handoff--> (30, 122) facing 90°
- *            --stop--> (6, 122) facing 180°
+ *   (0, 16) then (0, 19), and that pair once more
+ *   score the goal at (24, 24), drive to (24, 48), close the claw
+ *   score (24, 24), drive to (48, 24), close the claw
+ *   score (24, 24)
+ *   match-load (60, 0), score (24, 24)
+ *   score (24, 24) and the (24, 48) grab, two more times
+ *   match-load (60, 0), score the goal at (0, 72)
  *
- * Intake comes on half an inch into the first leg and stays on until the
- * last pose. Add mech.cascade.up() or mech.score() on a leg to run the lift.
+ * score() and matchLoad() are the same macros as the driver buttons.
+ * Pneumatic B low closes the claw.
  * ------------------------------------------------------------------------- */
 
 #include "auton/SkillsRoutine.h"
-#include "auton/Mechanisms.h"
 #include "auton/Rotation2d.h"
-#include "auton/TurnTo.h"
-#include "core/Specs.h"
+#include "core/Types.h"
+#include "logic/MatchLoader.h"
 
 namespace auton {
 
 Routine buildSkillsRoutine(const IFeedForward* model) {
-    Mechanisms& mech = robotMechanisms();
-
-    PathConstraints handoff;
-    handoff.handoff_in = inches(6);
+    // Sign selects reverse. The speed itself is a stop.
 
     return Routine(model, {
-        DriveTo(poseInches(30, Robot::Range::CENTER_Y_IN, 0, 0.0))
-            .afterTravel(inches(0.5), mech.intake.in()),
-        TurnTo(Rotation2d::fromDegrees(90)),
-        DriveTo(poseInches(30, Robot::Range::CENTER_Y_IN + 50.0, 90, 0.0), handoff),
-        TurnTo(Rotation2d::fromDegrees(180)),
-        DriveTo(poseInches(6, Robot::Range::CENTER_Y_IN + 50.0, 180))
-            .then(mech.intake.idle())
-            .then(mech.pneumatics.setGCommand(true)),
-    });
+        DriveTo(poseInches(0, 16, 0, kReverseStopMps), togglePath),
+        DriveTo(poseInches(0, 16, 0, kReverseStopMps), togglePath),
+
+        mech.score(24, 24, {}, -90),
+        DriveTo(poseInches(24, 48, -45), segmentPath())
+            .then(mech.pneumatics.setBCommand(MatchLoaderTune::kClawClosed)),
+
+        mech.score(24, 24, {}, -180),
+        DriveTo(poseInches(48, 24, -135), segmentPath())
+            .then(mech.pneumatics.setBCommand(MatchLoaderTune::kClawClosed)),
+
+        mech.score(24, 24),
+        mech.matchLoad(60, 0),
+        mech.score(24, 24),
+        mech.matchLoad(60, 0),
+        mech.score(24, 24),
+        mech.matchLoad(60, 0),
+        mech.score(24, 24),
+
+
+        mech.matchLoad(60, 0),
+        mech.score(0, 72),
+    }).startAt(poseInches(0, 18, 0));
 }
 
 } // namespace auton

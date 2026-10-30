@@ -42,8 +42,8 @@ def chassis_corners(x, y, theta):
         [[half_l, half_w], [half_l, -half_w], [-half_l, -half_w], [-half_l, half_w]],
         dtype=float,
     )
-    c = np.cos(theta)
-    s = np.sin(theta)
+    c = -np.sin(theta)
+    s = np.cos(theta)
     world = np.empty_like(local)
     world[:, 0] = x + local[:, 0] * c - local[:, 1] * s
     world[:, 1] = y + local[:, 0] * s + local[:, 1] * c

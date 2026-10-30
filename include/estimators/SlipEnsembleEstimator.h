@@ -37,6 +37,8 @@ public:
         range_phase_ = 0;
     }
 
+    void clearVelocity() override { v_lin_ = v_ang_ = 0.0; }
+
     void update(const SensorDict& sensors) override {
         const ChassisObservation& obs = sensors.chassis;
         const double d_theta = mathutil::normalize_angle(obs.heading_rad - last_heading_);

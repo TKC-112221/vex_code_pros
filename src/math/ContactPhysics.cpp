@@ -21,8 +21,8 @@ double inertiaKgM2() {
 }
 
 void pointVelocity(const ContactBody& body, double px, double py, double& vpx, double& vpy) {
-    const double c = std::cos(body.theta);
-    const double s = std::sin(body.theta);
+    const double c = mathutil::heading_cos(body.theta);
+    const double s = mathutil::heading_sin(body.theta);
     const double vx = body.v_fwd * c - body.v_lat * s;
     const double vy = body.v_fwd * s + body.v_lat * c;
     const double rx = px - body.x_m;
@@ -42,8 +42,8 @@ void applyNormalImpulse(ContactBody& body, double px, double py,
     const double iy = j * ny;
     const double dvx = ix / MockPlant::MASS_KG;
     const double dvy = iy / MockPlant::MASS_KG;
-    const double c = std::cos(body.theta);
-    const double s = std::sin(body.theta);
+    const double c = mathutil::heading_cos(body.theta);
+    const double s = mathutil::heading_sin(body.theta);
     body.v_fwd += dvx * c + dvy * s;
     body.v_lat += -dvx * s + dvy * c;
     body.omega += (rx * iy - ry * ix) / inertiaKgM2();
@@ -76,8 +76,8 @@ double pushCorner(ContactBody& body, double px, double py, double pen,
     const double corr = 0.65 * (pen - kSlop);
     body.x_m += nx * corr;
     body.y_m += ny * corr;
-    const double c = std::cos(body.theta);
-    const double s = std::sin(body.theta);
+    const double c = mathutil::heading_cos(body.theta);
+    const double s = mathutil::heading_sin(body.theta);
     return (nx * corr) * c + (ny * corr) * s;
 }
 
@@ -95,8 +95,8 @@ double wallImpulses(ContactBody& body) {
     // Two passes: the second corner of a flush side sees the velocity the
     // first corner already changed.
     for (int pass = 0; pass < 2; ++pass) {
-        const double c = std::cos(body.theta);
-        const double s = std::sin(body.theta);
+        const double c = mathutil::heading_cos(body.theta);
+        const double s = mathutil::heading_sin(body.theta);
         for (int i = 0; i < 4; ++i) {
             // Recompute after every push. A correction moves the center, and
             // the next wall has to see the corner where it is now.
@@ -144,8 +144,8 @@ void squareOrOrbit(ContactBody& body, double h, ContactStep& stepped,
     if (!wish.settled) {
         const double yaw = wish.omega * h;
         const double mid = body.theta + 0.5 * yaw;
-        const double c = std::cos(mid);
-        const double s = std::sin(mid);
+        const double c = mathutil::heading_cos(mid);
+        const double s = mathutil::heading_sin(mid);
         body.x_m += (wish.v_fwd * c - wish.v_lat * s) * h;
         body.y_m += (wish.v_fwd * s + wish.v_lat * c) * h;
         body.theta += yaw;
@@ -154,12 +154,12 @@ void squareOrOrbit(ContactBody& body, double h, ContactStep& stepped,
     } else {
         const double dist = std::hypot(gx - body.x_m, gy - body.y_m);
         const double theta_face = (dist > 1e-6)
-            ? std::atan2(gy - body.y_m, gx - body.x_m) : body.theta;
+            ? mathutil::direction_heading(gx - body.x_m, gy - body.y_m) : body.theta;
         double x_face = 0.0;
         double y_face = 0.0;
         frontedge::placeCenter(x_face, y_face, theta_face, gx, gy, 0.0);
-        const double c0 = std::cos(body.theta);
-        const double s0 = std::sin(body.theta);
+        const double c0 = mathutil::heading_cos(body.theta);
+        const double s0 = mathutil::heading_sin(body.theta);
         pull_fwd = (x_face - body.x_m) * c0 + (y_face - body.y_m) * s0;
         pull_yaw = mathutil::normalize_angle(theta_face - body.theta);
         body.theta = theta_face;
@@ -216,8 +216,8 @@ void integrateSlice(ContactBody& body, double h, ContactStep& stepped,
 
     const double yaw = body.omega * h;
     const double mid = body.theta + 0.5 * yaw;
-    const double c = std::cos(mid);
-    const double s = std::sin(mid);
+    const double c = mathutil::heading_cos(mid);
+    const double s = mathutil::heading_sin(mid);
     body.x_m += body.v_fwd * h * c - lat_avg * h * s;
     body.y_m += body.v_fwd * h * s + lat_avg * h * c;
     body.theta += yaw;
@@ -243,8 +243,8 @@ void separateWalls(ContactBody& body) {
 
     for (int pass = 0; pass < 8; ++pass) {
         bool outside = false;
-        const double c = std::cos(body.theta);
-        const double s = std::sin(body.theta);
+        const double c = mathutil::heading_cos(body.theta);
+        const double s = mathutil::heading_sin(body.theta);
         for (int i = 0; i < 4; ++i) {
             const double px = body.x_m + bx[i] * c - by[i] * s;
             const double py = body.y_m + bx[i] * s + by[i] * c;
@@ -260,8 +260,8 @@ void separateWalls(ContactBody& body) {
     const double push_y = body.y_m - y0;
     if (push_x == 0.0 && push_y == 0.0) return;
 
-    const double c = std::cos(body.theta);
-    const double s = std::sin(body.theta);
+    const double c = mathutil::heading_cos(body.theta);
+    const double s = mathutil::heading_sin(body.theta);
     double vx = body.v_fwd * c - body.v_lat * s;
     double vy = body.v_fwd * s + body.v_lat * c;
     if (push_x < 0.0 && vx > 0.0) vx = 0.0;

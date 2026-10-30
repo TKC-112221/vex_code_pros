@@ -2,6 +2,11 @@
 /* ---------------------------------------------------------------------------
  * DriftFollower  --  one planned curve, then a follower.
  *
+ * The plan is the centre of rotation. A Tracking command names the front
+ * bumper, and that point is shifted by the offset in TrackingCenter.h.
+ * The sampled polyline is shifted back, so the field drawing stays in
+ * the command's frame. An orbit already splits the two points itself.
+ *
  * Same calls as DriftCurve, so it can stand in for that class. reset()
  * drops the plan. The next compute() fits the curve once from the pose it
  * is given and keeps that polyline. Later ticks project onto it. They do
@@ -105,6 +110,7 @@
  * ------------------------------------------------------------------------- */
 
 #include "control/DriftCurve.h"
+#include "control/MotionStuck.h"
 
 // Atan maps a_lat through drift_accel. Arcsin maps it through a_max.
 enum class DriftSlipModel { Atan, Arcsin };
@@ -126,11 +132,11 @@ struct DriftFollowerConfig : DriftCurveConfig {
     // and the skills follower would keep planning Hermite.
     double k_slip = Drift::K_SLIP;           // 1/s. Subtracted from lateral accel per m/s of v_lat.
     double a_max = Drift::A_MAX;             // m/s^2. Arcsin thrust, and the atan lateral projection.
-    double lat_kP = Drift::LAT_KP;           // V per m of cross-track
-    double lat_kI = Drift::LAT_KI;           // V per (m·s)
-    double lat_kD = Drift::LAT_KD;           // V per (m/s)
-    double lat_kD2 = Drift::LAT_KD2;         // V per (m/s^2). Nonzero makes the lateral loop PIDD2.
-    double lat_i_limit = Drift::LAT_I_LIMIT; // volt clamp on the lateral integrator term
+    double lat_kP = Drift::LAT_KP;           // rad/s per m of cross-track
+    double lat_kI = Drift::LAT_KI;           // rad/s per (m·s)
+    double lat_kD = Drift::LAT_KD;           // rad/s per (m/s)
+    double lat_kD2 = Drift::LAT_KD2;         // rad/s per (m/s^2). Nonzero makes the lateral loop PIDD2.
+    double lat_i_limit = Drift::LAT_I_LIMIT; // rad/s clamp on the lateral integrator term
 
     // Heading trim and settle window. Defaults match Boomerang:: / Motion::.
     // The tuner overwrites these for one rollout; the firmware keeps the defaults.
@@ -182,8 +188,8 @@ public:
 
     void reset();
 
-    // Chassis model for the linear volts and the yaw kV / kA. Null leaves
-    // both feedforwards at zero. The pointer is not owned.
+    // Kept so callers can still pass a model. The drive base owns the VAS
+    // conversion. The pointer is not used and is not owned.
     void bindFeedforward(const IFeedForward* model) { model_ = model; }
 
     // state : field pose, forward speed (v_lin, m/s), yaw rate (v_ang, rad/s).
@@ -195,14 +201,21 @@ public:
 
     // True once forward speed has dropped to settle_speed after the leg has
     // been moving, or once the distance to the target grows past the closest
-    // point reached so far. A coordinate window is not required. A planned
-    // reversal, where path speed is zero and later stations speed up, is not
-    // the end of the leg. turn_on_goal still settles on heading.
+    // point reached so far. A coordinate window is not required. A stop also
+    // waits until the nose is on the exit heading. A planned reversal, where
+    // path speed is zero and later stations speed up, is not the end of the
+    // leg. turn_on_goal still settles on heading.
     bool settled() const { return settled_; }
 
-    // Polyline the follower is tracking. Before the first compute() this
-    // is a preview from `from` and does not commit the plan. v_lin and
-    // v_ang are the measured momentum a Hermite preview opens along.
+    // True once a translate or pivot request has gone unanswered. A hold
+    // does not set it, and a settled leg clears it.
+    bool stuck() const { return stuck_watch_.stuck(); }
+
+    // Polyline the follower is tracking, the centre of rotation, in field
+    // inches. A command pose is the front bumper; this line is the axle.
+    // Before the first compute() this is a preview from `from` and does not
+    // commit the plan. v_lin and v_ang are the measured momentum a Hermite
+    // preview opens along.
     // With timed_elastic the preview, and the path after compute(), is the
     // band committed with the plan. A later pose does not rebuild it.
     int samplePath(const Pose2d& from, Pose2d* out, int cap,
@@ -275,6 +288,7 @@ private:
     bool lat_primed_ = false;
     double goal_heading_ = 0;
     bool settled_ = false;
+    MotionStuck stuck_watch_;
     double small_held_ = 0;
     double large_held_ = 0;
     // Closest approach to the target this leg, in meters. dist_armed_ is

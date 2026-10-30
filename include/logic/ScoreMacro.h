@@ -10,8 +10,10 @@
  * 4. Open the claw (pneumatic B).
  * 5. Run the cascade down until it stalls at the bottom.
  *
- * Driver: d-pad Right starts it. Right again, or L1 / L2, cancels it.
- * Autonomous: SubsystemCommand::score rising edge starts the same machine.
+ * The live score sequence is GoalScore. Call apply() to run this
+ * current-based cascade sequence. While it is the live path, d-pad Right
+ * or a SubsystemCommand::score rising edge starts it, and Right again or
+ * L1 / L2 cancels it.
  * The stall and seat currents are the numbers to change on the real lift.
  * ------------------------------------------------------------------------- */
 

@@ -14,6 +14,15 @@
 #include <cstring>
 #include <vector>
 
+#if !defined(ROBOT_HOST)
+#define TRACE(...)                                      \
+    do {                                                \
+        std::printf("trace: " __VA_ARGS__);             \
+        std::printf("\n");                              \
+        std::fflush(stdout);                            \
+    } while (0)
+#endif
+
 #if defined(ROBOT_HOST)
 #include "host/FieldWindow.h"
 #endif
@@ -86,32 +95,56 @@ bool shoulderHalt() {
         && down(pros::E_CONTROLLER_DIGITAL_R1) && down(pros::E_CONTROLLER_DIGITAL_R2);
 }
 
-bool userSkipped() {
-    if (shoulderHalt()) return true;
+bool userSkipped(bool talk) {
+    if (talk) TRACE("buttons");
+    if (shoulderHalt()) {
+        if (talk) TRACE("buttons hit");
+        return true;
+    }
+    if (talk) TRACE("touch");
     pros::screen_touch_status_s_t status = pros::c::screen_touch_status();
+    if (talk) TRACE("touch done press=%ld", (long)status.press_count);
     if (!g_press_init) {
         g_press0 = status.press_count;
         g_press_init = true;
         return false;
     }
-    return status.press_count != g_press0;
+    if (status.press_count != g_press0) {
+        if (talk) TRACE("touch hit");
+        return true;
+    }
+    return false;
 }
 
 bool presentFrame(std::uint32_t* pixels, std::uint32_t hold_ms) {
+    TRACE("copy");
     pros::c::screen_copy_area(0, 0, (std::int16_t)(kScreenW - 1), (std::int16_t)(kScreenH - 1),
                               pixels, (std::int32_t)kScreenW);
+    TRACE("copy done");
     std::uint32_t left = hold_ms;
     while (left > 0) {
-        if (userSkipped()) return false;
+        TRACE("hold poll left=%u", left);
+        if (userSkipped(true)) {
+            TRACE("skip in hold");
+            return false;
+        }
         std::uint32_t slice = left > 20u ? 20u : left;
         pros::delay(slice);
         left -= slice;
     }
-    return !userSkipped();
+    TRACE("hold poll");
+    if (userSkipped(true)) {
+        TRACE("skip after hold");
+        return false;
+    }
+    TRACE("hold done");
+    return true;
 }
 
 void endPresentation() {
+    TRACE("endPresentation");
     g_press_init = false;
+    TRACE("endPresentation done");
 }
 
 #endif
@@ -121,6 +154,9 @@ void endPresentation() {
 int playFrameSequence(const FrameSequence& seq) {
     if (seq.path_format == nullptr || seq.path_format[0] == '\0') return 0;
     int step = seq.frame_step < 1 ? 1 : seq.frame_step;
+#if !defined(ROBOT_HOST)
+    TRACE("play start count=%d step=%d", seq.frame_count, step);
+#endif
 
     std::uint32_t period = 0;
     if (seq.fps > 0.0 && seq.fps < 1000.0)
@@ -145,7 +181,11 @@ int playFrameSequence(const FrameSequence& seq) {
 #if !defined(ROBOT_HOST)
         // Stop before decoding the next file. presentFrame also polls, but
         // a shoulder chord held during a slow card read should not wait.
-        if (userSkipped()) break;
+        TRACE("frame %d poll", n);
+        if (userSkipped(true)) {
+            TRACE("frame %d skip", n);
+            break;
+        }
 #endif
 
         char path[512];
@@ -158,19 +198,48 @@ int playFrameSequence(const FrameSequence& seq) {
         std::vector<std::uint8_t> rgba;
         int iw = 0;
         int ih = 0;
+#if !defined(ROBOT_HOST)
+        TRACE("frame %d load", n);
+#endif
         if (!loadPngRgba(path, rgba, iw, ih)) {
-            if (seq.frame_count <= 0) break;
+#if !defined(ROBOT_HOST)
+            TRACE("frame %d miss", n);
+#endif
+            // No frame yet: the card or the clip is absent. Do not walk the
+            // rest of the count. A later gap, after one frame has shown, skips.
+            if (!started || seq.frame_count <= 0) break;
             continue;
         }
+#if !defined(ROBOT_HOST)
+        TRACE("frame %d decoded %dx%d", n, iw, ih);
+        TRACE("frame %d blit", n);
+#endif
 
         blitFit(rgba.data(), iw, ih, screen);
         std::uint32_t spent = pros::millis() - t0;
         std::uint32_t hold = period > spent ? period - spent : 0;
         started = true;
-        if (!presentFrame(screen.data(), hold)) break;
+#if !defined(ROBOT_HOST)
+        TRACE("frame %d present hold=%u", n, hold);
+#endif
+        if (!presentFrame(screen.data(), hold)) {
+#if !defined(ROBOT_HOST)
+            TRACE("frame %d aborted", n);
+#endif
+            break;
+        }
         ++shown;
+#if !defined(ROBOT_HOST)
+        TRACE("frame %d shown", n);
+#endif
     }
 
+#if !defined(ROBOT_HOST)
+    TRACE("loop exit shown=%d started=%d", shown, started ? 1 : 0);
+#endif
     if (started) endPresentation();
+#if !defined(ROBOT_HOST)
+    TRACE("play return %d", shown);
+#endif
     return shown;
 }

@@ -4,7 +4,7 @@
  *
  * Pose2d remains the pipeline's pose (x, y, theta in radians). This type is
  * the heading half of that pose, so a routine can add and subtract directions
- * without touching the estimator. 0 is +X and CCW is positive, matching Pose2d.
+ * without touching the estimator. 0 is +Y and CCW is positive, matching Pose2d.
  * ------------------------------------------------------------------------- */
 
 #include "core/Specs.h"

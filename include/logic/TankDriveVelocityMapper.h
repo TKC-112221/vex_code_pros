@@ -2,8 +2,8 @@
 /* ---------------------------------------------------------------------------
  * TankDriveVelocityMapper  --  relative arcade tankdrive stick -> CommandVector.
  * left_y  -> surge,  -right_x -> yaw,  sway = 0.
- * Outputs open-loop chassis effort (stick * max_volts) for the passthrough
- * controller path; a richer ICommandProcessor can reinterpret units later.
+ * Outputs a velocity. Full deflection is the chassis free speed. The drive
+ * base turns that into volts with its VAS model.
  * ------------------------------------------------------------------------- */
 
 #include "interfaces/IVelocityMapper.h"
@@ -15,10 +15,12 @@ public:
         : max_volts_(max_volts) {}
 
     CommandVector map(double /*imu_heading_rad*/, const JoystickData& joy) override {
+        (void)max_volts_;
         CommandVector cmd;
-        cmd.surge = joy.left_y * max_volts_;
-        cmd.sway  = 0.0;                         // differential: no lateral
-        cmd.yaw   = (-joy.right_x) * max_volts_; // match prior turn sign
+        cmd.request = DriveRequest::Motion;
+        cmd.surge = joy.left_y * Robot::MAX_VEL_LIN;
+        cmd.sway  = 0.0;                 // differential: no lateral
+        cmd.yaw   = -joy.right_x * Robot::MAX_VEL_ANG;
         return cmd;
     }
 

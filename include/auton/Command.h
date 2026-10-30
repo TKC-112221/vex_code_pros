@@ -6,9 +6,9 @@
  * each control tick and returns true when the block is finished. end() runs
  * once, with interrupted set when a deadline or a cancel cut it short.
  *
- * A command describes an outcome. Drive commands ask a follower for
- * chassis volts. Mechanism commands only change a subsystem state. None of
- * them write motor voltage themselves.
+ * A command describes an outcome. Drive commands ask a follower for a
+ * control vector. Mechanism commands only change a subsystem state. None
+ * of them write motor voltage. The drive base does that.
  * ------------------------------------------------------------------------- */
 
 #include "auton/Rotation2d.h"
@@ -25,10 +25,30 @@ struct CommandTick {
     const StateEstimate& state;
     ChassisCommand drive{};
     bool drive_active = false;
+    // A chassis macro owns the drivetrain. Motion commands hold and, when this
+    // clears, replan from the pose the macro left.
+    bool pause_motion = false;
+    // The motion gave up because the chassis was not answering, or it ran
+    // past its own time budget. A deadline group ends its side commands on
+    // this tick instead of waiting for them.
+    bool yielded = false;
+    // The deadline motion arrived. A travel or yaw gate that has not fired
+    // yet runs its action on this tick. Waiting for more distance would
+    // hang: the chassis is no longer being driven.
+    bool motion_arrived = false;
 
     void setDrive(const ChassisCommand& cmd) {
         drive = cmd;
         drive_active = true;
+    }
+
+    // A parallel child sees the same pose and the same pause, and its drive
+    // does not leak into this tick until the parent copies it.
+    CommandTick branch() const {
+        CommandTick side{state};
+        side.pause_motion = pause_motion;
+        side.motion_arrived = motion_arrived;
+        return side;
     }
 };
 

@@ -22,39 +22,18 @@ bool g_suppress = false;
 bool g_enabled = true;
 
 CommandVector voltsFor(double v_cmd, double omega, const IFeedForward* model) {
+    (void)model;
     if (std::fabs(v_cmd) < GoalAlign::VEL_DEADBAND) v_cmd = 0.0;
     if (std::fabs(omega) < GoalAlign::VEL_DEADBAND) omega = 0.0;
 
-    double turn_r = Physics::TURN_RADIUS_MAX_M;
-    if (std::fabs(omega) > Physics::OMEGA_EPS) {
-        turn_r = std::fabs(v_cmd) / std::fabs(omega);
-        if (turn_r > Physics::TURN_RADIUS_MAX_M) turn_r = Physics::TURN_RADIUS_MAX_M;
-    }
-
-    double surge;
-    double yaw;
-    if (model != nullptr) {
-        surge = model->linearVolts(v_cmd, 0.0, std::fabs(v_cmd), 0.0, omega, turn_r);
-        // angularVolts is V_R - V_L. The chassis command is half of that.
-        yaw = model->angularVolts(omega, 0.0, std::fabs(v_cmd), 0.0, turn_r) / 2.0;
-    } else {
-        surge = Feedforward::KV_LIN * v_cmd;
-        yaw = Feedforward::KV_ANG * omega / 2.0;
-    }
-
-    // Keep the turn when surge and yaw together would clip a side.
-    const double room = System::MAX_VOLTS - std::fabs(yaw);
-    if (room <= 0.0) {
-        surge = 0.0;
-        yaw = std::copysign(System::MAX_VOLTS, yaw);
-    } else if (std::fabs(surge) > room) {
-        surge = std::copysign(room, surge);
-    }
-
+    // The drive base turns this speed into voltage, and it keeps yaw on the rail.
     CommandVector out;
-    out.surge = surge;
+    out.request = DriveRequest::Motion;
+    out.surge = v_cmd;
     out.sway = 0.0;
-    out.yaw = yaw;
+    out.yaw = omega;
+    out.pivot = std::fabs(v_cmd) <= GoalAlign::VEL_DEADBAND
+             && std::fabs(omega) > GoalAlign::VEL_DEADBAND;
     return out;
 }
 
@@ -86,10 +65,15 @@ int frontTouch(const Pose2d& pose_in) {
 
 // The yaw stick is the orbit rate about the goal. Square-up lives in the
 // plant, so a pose the localizer has not caught up with cannot hold the stick.
+// The mapper has already applied the free-drive turn scale. That scale is
+// undone here so full deflection is the orbit cap, not a fraction of it.
 CommandVector holdCommand(const CommandVector& commands, const IFeedForward* model) {
-    double yaw_frac = commands.yaw / System::MAX_VOLTS;
-    yaw_frac = mathutil::clamp_val(yaw_frac, -1.0, 1.0);
-    return voltsFor(0.0, yaw_frac * GoalAlign::MAX_YAW_RAD_S, model);
+    // The mapper already scaled the stick onto free yaw speed, including
+    // TURN_STICK_SCALE. Undo that scale so full deflection is the orbit cap.
+    double yaw = commands.yaw;
+    if (Tuning::TURN_STICK_SCALE > 1e-3) yaw /= Tuning::TURN_STICK_SCALE;
+    yaw = mathutil::clamp_val(yaw, -GoalAlign::MAX_YAW_RAD_S, GoalAlign::MAX_YAW_RAD_S);
+    return voltsFor(0.0, yaw, model);
 }
 
 } // namespace
@@ -125,8 +109,8 @@ void goalAlignPivot(const Pose2d& pose_in, double& gx, double& gy) {
 
     const Pose2d pose = poseInchesToMeters(pose_in);
     const double half_l = Robot::Chassis::BODY_LENGTH_M * 0.5;
-    const double fx = pose.x + half_l * std::cos(pose.theta);
-    const double fy = pose.y + half_l * std::sin(pose.theta);
+    const double fx = pose.x + half_l * mathutil::heading_cos(pose.theta);
+    const double fy = pose.y + half_l * mathutil::heading_sin(pose.theta);
     int best = -1;
     double best_d = 0.0;
     for (int i = 0; i < n; ++i) {
@@ -203,7 +187,8 @@ int goalAlignPath(const Pose2d& from, Pose2d* out, int cap) {
     const double gy = inchesToMeters(spot.y);
     const Pose2d pose = poseInchesToMeters(from);
     const double dist = std::hypot(gx - pose.x, gy - pose.y);
-    const double theta_face = (dist > 1e-6) ? std::atan2(gy - pose.y, gx - pose.x) : pose.theta;
+    const double theta_face = (dist > 1e-6)
+        ? mathutil::direction_heading(gx - pose.x, gy - pose.y) : pose.theta;
     const int n = (cap < 17) ? cap : 17;
     for (int i = 0; i < n; ++i) {
         const double u = (n == 1) ? 0.0 : static_cast<double>(i) / static_cast<double>(n - 1);

@@ -52,6 +52,28 @@ namespace Gains {
 
 namespace Tuning {
     constexpr double SLEW_STEP_VOLTAGE = 0.3;
+    // Chassis command lag, seconds. This is the sim plant's wheel-speed
+    // time constant. A one-tick brake reversal then arrives as a fraction
+    // of a volt, which is what that plant already does to wheel speed.
+    constexpr double DRIVE_VOLTAGE_TAU_SEC = 0.15;
+    // In-place pivot. The rolling feedforward held a real pivot at about
+    // 0.3 rad/s. Volts added per rad/s the measured yaw is short of the
+    // command, and the most that term may add.
+    constexpr double YAW_SCRUB_V_PER_RAD_S = 2.0;
+    constexpr double YAW_SCRUB_MAX_V = 5.0;
+    // Cascade command ramp, percent of full voltage per 10 ms tick.
+    // 2.5 reaches 100% in 0.4 s, in either direction.
+    constexpr double CASCADE_SLEW_PCT = 2.5;
+    // Height loop. Percent per inch of error. The brake accel is how early
+    // the command flips against motion so the slew can stop on the target.
+    constexpr double CASCADE_KP_PCT_PER_IN = 25.0;
+    constexpr double CASCADE_BRAKE_IN_S2 = 18.0;
+    constexpr double CASCADE_HOLD_IN = 0.35;
+    constexpr double CASCADE_HOLD_RPM = 8.0;
+    // Open-loop shoulder command that is stopped and at the motor current
+    // cap. Voltage drops after this long so the drive keeps the battery.
+    constexpr double CASCADE_STALL_AMPS = 2.2;
+    constexpr double CASCADE_STALL_SEC = 0.4;
     constexpr double CUBE_RATIO        = 0.8;
     constexpr double TURN_INTENSITY    = 0.4;
     // Extra scale on the turn stick after the drive curve.
@@ -73,24 +95,22 @@ namespace Pivot {
 
 // Goal lock. The drive attaches when the front edge comes within
 // FRONT_TOUCH_M of a goal point. Forward is dropped. The yaw stick is
-// the orbit rate about that point, capped at MAX_YAW_RAD_S. Reverse
-// lets go.
+// the orbit rate about that point. Full deflection is MAX_YAW_RAD_S.
+// Reverse lets go.
 namespace GoalAlign {
     constexpr double FRONT_TOUCH_M = 0.04;
-    constexpr double MAX_YAW_RAD_S = 3.0;
+    constexpr double MAX_YAW_RAD_S = 8.0;
     constexpr double VEL_DEADBAND = 0.04;
     // Square the nose onto the point after a touch. The time constant is
     // short so the bumper centers as it arrives, then the yaw stick takes over.
     constexpr double CENTER_TAU_SEC = 0.08;
     constexpr double CENTER_POS_M = 0.003;
     constexpr double CENTER_HEAD_RAD = 0.02;
-    // Latched swing. Surge presses the bumper into the point. Yaw sweeps the
-    // heading. Their sum is the rail, and surge stays the larger one: the
-    // inside wheel is surge - yaw, and a negative inside wheel backs the
-    // bumper off the goal. The yaw volts follow the brake curve up to
-    // TURN_YAW_RAD_S, so a short remainder does not keep the full turn.
-    constexpr double TURN_SURGE_V = 7.0;
-    constexpr double TURN_YAW_V = 5.0;
+    // Latched swing. The bumper is held on the point at TURN_SURGE_MPS.
+    // Yaw follows the brake curve up to TURN_YAW_RAD_S. At that rate the
+    // inside wheel speed stays forward, so the bumper is not walked off
+    // the point. The drive's VAS turns both into voltage.
+    constexpr double TURN_SURGE_MPS = 1.2;
     constexpr double TURN_YAW_RAD_S = 6.0;
     constexpr double TURN_YAW_ACCEL = 8.0;
     constexpr double TURN_SETTLE_RAD_S = 0.25;
@@ -101,11 +121,14 @@ namespace GoalAlign {
 // on the nearest goal along that edge. Heading is kept. The spike is not
 // required to lie on the forward axis: a yawing hit stops the bumper
 // sideways. A forward accel above LAUNCH_G is a launch, not a stop.
-// Drivetrain braking stays below DECEL_G; a clipped hit reaches the
-// inertial sensor's ±4 g rail.
+// The spike also has to disagree with the wheels: SURPRISE_G is the
+// specific force the encoder step and the skid formula do not explain.
+// Braking that the wheels show stays under it. A bumper stop, where the
+// chassis decelerates and the wheels have not, does not.
 namespace GoalBump {
     constexpr double DECEL_G = 3.0;
     constexpr double LAUNCH_G = 1.0;
+    constexpr double SURPRISE_G = 1.5;
     constexpr double APPROACH_MPS = 0.15;
     constexpr double LOOKAHEAD_M = 0.35;
     // Estimate overshoot while yawing. The goal can sit this far behind
@@ -197,6 +220,14 @@ namespace Motion {
 #endif
     // |speed - exit speed| inside this counts as settled, m/s.
     constexpr double SETTLE_SPEED_MPS = 0.2;
+    // Unanswered translation or an in-place pivot. A hold that asks for
+    // neither does not count. Past this the autonomous leg gives up.
+    constexpr double STUCK_SEC = 1.0;
+    // Yaw rate that answers a pivot, rad/s. Below this the chassis is stopped.
+    constexpr double STUCK_YAW_RAD_S = 0.4;
+    // Nose error that counts as a pivot request when the leg is not asking
+    // to translate, radians.
+    constexpr double STUCK_YAW_ERR_RAD = 0.12;
 }
 
 // Armature volts = kS sgn(v) + kV v + kA a.
@@ -246,12 +277,12 @@ namespace Drift {
     constexpr double A_MAX = 8.0;
     // Nose lead stays inside about 35 degrees. Past that the lateral loop steers.
     constexpr double MAX_SLIP_RAD = 0.6;
-    // Volts per meter of cross-track, and the derivative in V per (m/s).
+    // Yaw rate per meter of cross-track, and the derivative in rad/s per (m/s).
     constexpr double LAT_KP = 4.0;
     constexpr double LAT_KI = 0.2;
     constexpr double LAT_KD = 0.3;
     constexpr double LAT_KD2 = 0.0;
-    constexpr double LAT_I_LIMIT = 1.0;
+    constexpr double LAT_I_LIMIT = 1.0; // rad/s clamp on the lateral integrator term
 #endif
     constexpr double BOOMERANG_LEAD = 1.0;
     constexpr double BOOMERANG_MAX_SLIP = 0.7;
@@ -270,13 +301,37 @@ namespace Turn {
     constexpr double MIN_SETTLE_RATE = 0.02;
     constexpr double MIN_ACCEL = 0.05;
     constexpr double MIN_VEL = 0.05;
+    // Trapezoid caps for TurnTo. The bound feedforward turns the planned
+    // yaw rate into volts; these two decide how fast that plan is allowed
+    // to move. The paste replaces them when the tuner has searched a pivot.
+#if USE_TUNING_PASTE
+#define TUNING_PASTE_PART 8
+#include "data/tuning_paste.inc"
+#else
+    constexpr double MAX_VEL_RAD_S = 4.0;
+    constexpr double MAX_ACCEL_RAD_S2 = 6.0;
+#endif
+}
+
+// Stanley tracker on DriveTo's straight-segment leg. Path accel and the
+// heading trim come from Drift and Boomerang. These three are the part
+// that only the polyline follower reads.
+namespace Segment {
+#if USE_TUNING_PASTE
+#define TUNING_PASTE_PART 9
+#include "data/tuning_paste.inc"
+#else
+    constexpr double STANLEY_K = 1.5;
+    constexpr double STANLEY_SOFT = 0.30;
+    constexpr double PIVOT_RAD = 50.0 * Robot::PI / 180.0;
+#endif
 }
 
 // Button A practice drive, and the accel the plant binding uses for a guide.
 namespace Practice {
     constexpr double GOAL_X = 0.0;
     constexpr double GOAL_Y = 36.0;
-    constexpr double GOAL_HEADING_RAD = Robot::PI / 2.0;
+    constexpr double GOAL_HEADING_RAD = 0.0;
     constexpr double EXIT_SPEED_MPS = 2.0;
 #if USE_TUNING_PASTE
 #define TUNING_PASTE_PART 5

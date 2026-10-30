@@ -35,8 +35,8 @@ inline Finish finishOf(double rx, double ry, double tx, double ty,
                 double approach, double line_length) {
     Finish fin;
     fin.length = line_length > 0.0 ? line_length : 0.0;
-    const double ux = std::cos(approach);
-    const double uy = std::sin(approach);
+    const double ux = mathutil::heading_cos(approach);
+    const double uy = mathutil::heading_sin(approach);
     fin.jx = tx - fin.length * ux;
     fin.jy = ty - fin.length * uy;
     fin.along = (rx - tx) * ux + (ry - ty) * uy;
@@ -59,8 +59,8 @@ struct Arc {
 inline Arc arcThrough(double rx, double ry, double tx, double ty, double approach) {
     const double dx = rx - tx;
     const double dy = ry - ty;
-    const double ux = std::cos(approach);
-    const double uy = std::sin(approach);
+    const double ux = mathutil::heading_cos(approach);
+    const double uy = mathutil::heading_sin(approach);
     const double nx = -uy; // left of the arrival heading
     const double ny = ux;
     const double along = dx * ux + dy * uy;
@@ -75,7 +75,7 @@ inline Arc arcThrough(double rx, double ry, double tx, double ty, double approac
     // On the heading axis the circle is the line itself.
     if (std::fabs(lat) < kOnAxisM) {
         arc.length_m = dist;
-        if (along > 0.0) arc.phi = std::atan2(ty - ry, tx - rx);
+        if (along > 0.0) arc.phi = mathutil::direction_heading(tx - rx, ty - ry);
         return arc;
     }
 
@@ -94,7 +94,7 @@ inline Arc arcThrough(double rx, double ry, double tx, double ty, double approac
         dir_x = -dir_x;
         dir_y = -dir_y;
     }
-    arc.phi = std::atan2(dir_y, dir_x);
+    arc.phi = mathutil::direction_heading(dir_x, dir_y);
     arc.kappa = 1.0 / r;
     arc.cx = cx;
     arc.cy = cy;
@@ -207,8 +207,8 @@ inline void graphFrame(const GraphPath& path, double xi, double& phi, double& ka
     const double toward = (path.xi0 > 0.0) ? -1.0 : 1.0;
     const double dir_u = toward;
     const double dir_n = toward * m;
-    phi = std::atan2(dir_u * path.uy + dir_n * path.ny,
-                     dir_u * path.ux + dir_n * path.nx);
+    phi = mathutil::direction_heading(dir_u * path.ux + dir_n * path.nx,
+                                      dir_u * path.uy + dir_n * path.ny);
     kappa = toward * eta_pp / (speed * speed * speed);
 }
 
@@ -267,8 +267,8 @@ inline void graphTangent(const GraphPath& path, double xi, double& phi, double& 
     }
     const double speed = std::sqrt(1.0 + m * m);
     const double toward = (path.xi0 > 0.0) ? -1.0 : 1.0;
-    phi = std::atan2(toward * path.uy + toward * m * path.ny,
-                     toward * path.ux + toward * m * path.nx);
+    phi = mathutil::direction_heading(toward * path.ux + toward * m * path.nx,
+                                      toward * path.uy + toward * m * path.ny);
     const double sp3 = speed * speed * speed;
     kappa = (sp3 > 1e-9) ? toward * eta_pp / sp3 : 0.0;
 }
@@ -277,8 +277,8 @@ inline GraphPath graphThrough(double rx, double ry, double tx, double ty,
                        double approach, bool quartic, double rate) {
     const double dx = rx - tx;
     const double dy = ry - ty;
-    const double ux = std::cos(approach);
-    const double uy = std::sin(approach);
+    const double ux = mathutil::heading_cos(approach);
+    const double uy = mathutil::heading_sin(approach);
     const double nx = -uy;
     const double ny = ux;
     const double xi0 = dx * ux + dy * uy;
@@ -302,7 +302,7 @@ inline GraphPath graphThrough(double rx, double ry, double tx, double ty,
     // Beside the target, or already on the heading line: no graph to fit.
     if (std::fabs(xi0) < kOnAxisM || std::fabs(eta0) < kOnAxisM) {
         path.length_m = dist;
-        if (xi0 > 0.0) path.phi = std::atan2(ty - ry, tx - rx);
+        if (xi0 > 0.0) path.phi = mathutil::direction_heading(tx - rx, ty - ry);
         return path;
     }
 
@@ -332,7 +332,8 @@ inline GraphPath graphThrough(double rx, double ry, double tx, double ty,
     const double toward = (xi0 > 0.0) ? -1.0 : 1.0;
     const double dir_u = toward;
     const double dir_n = toward * m;
-    path.phi = std::atan2(dir_u * uy + dir_n * ny, dir_u * ux + dir_n * nx);
+    path.phi = mathutil::direction_heading(dir_u * ux + dir_n * nx,
+                                          dir_u * uy + dir_n * ny);
     path.kappa = toward * eta_pp / (speed * speed * speed);
     path.graph = true;
     path.length_m = graphLength(path, rx, ry);
@@ -406,7 +407,7 @@ inline void quinticDeriv(const Quintic& path, double t,
 inline void quinticFrame(const Quintic& path, double t, double& phi, double& kappa) {
     double dx = 0.0, dy = 0.0, ddx = 0.0, ddy = 0.0;
     quinticDeriv(path, t, dx, dy, ddx, ddy);
-    phi = std::atan2(dy, dx);
+    phi = mathutil::direction_heading(dx, dy);
     kappa = 0.0;
     const double speed2 = dx * dx + dy * dy;
     if (speed2 > 1e-12) {
@@ -460,8 +461,8 @@ inline double quinticLength(const Quintic& path) {
 inline Quintic quinticThrough(double rx, double ry, double tx, double ty, double approach) {
     const double dx = rx - tx;
     const double dy = ry - ty;
-    const double ux = std::cos(approach);
-    const double uy = std::sin(approach);
+    const double ux = mathutil::heading_cos(approach);
+    const double uy = mathutil::heading_sin(approach);
     const double nx = -uy;
     const double ny = ux;
     const double xi0 = dx * ux + dy * uy;
@@ -475,7 +476,7 @@ inline Quintic quinticThrough(double rx, double ry, double tx, double ty, double
     // Beside the join, or already on the heading line: no curve to fit.
     if (std::fabs(xi0) < kOnAxisM || std::fabs(eta0) < kOnAxisM) {
         path.length_m = dist;
-        if (xi0 > 0.0) path.phi = std::atan2(ty - ry, tx - rx);
+        if (xi0 > 0.0) path.phi = mathutil::direction_heading(tx - rx, ty - ry);
         return path;
     }
 
@@ -516,7 +517,7 @@ inline Quintic quinticThrough(double rx, double ry, double tx, double ty, double
     const double speed2 = dxi * dxi + deta * deta;
     const double dir_x = dxi * ux + deta * nx;
     const double dir_y = dxi * uy + deta * ny;
-    path.phi = std::atan2(dir_y, dir_x);
+    path.phi = mathutil::direction_heading(dir_x, dir_y);
     if (speed2 > 1e-12) {
         const double speed = std::sqrt(speed2);
         path.kappa = (dxi * ddeta - deta * ddxi) / (speed2 * speed);
@@ -530,8 +531,8 @@ inline Quintic quinticThrough(double rx, double ry, double tx, double ty, double
 // Below kMomentumSpeed the travel heading stands in and curvature is zero:
 // a near-stop has no direction to absorb.
 struct Momentum {
-    double x = 1;
-    double y = 0;
+    double x = 0;
+    double y = 1;
     double kappa = 0;
 };
 
@@ -548,13 +549,13 @@ inline Momentum momentumOf(double theta, bool forwards, double v_lin, double v_a
     const double speed = std::fabs(v_lin);
     if (speed < kMomentumSpeed) {
         const double face = forwards ? theta : (theta + Robot::PI);
-        m.x = std::cos(face);
-        m.y = std::sin(face);
+        m.x = mathutil::heading_cos(face);
+        m.y = mathutil::heading_sin(face);
         return m;
     }
     const double sense = (v_lin > 0.0) ? 1.0 : -1.0;
-    m.x = sense * std::cos(theta);
-    m.y = sense * std::sin(theta);
+    m.x = sense * mathutil::heading_cos(theta);
+    m.y = sense * mathutil::heading_sin(theta);
     m.kappa = v_ang / speed;
     return m;
 }
@@ -567,8 +568,8 @@ inline GraphPath quarticHermiteThrough(double rx, double ry, double tx, double t
                                 double kappa0) {
     const double dx = rx - tx;
     const double dy = ry - ty;
-    const double ux = std::cos(approach);
-    const double uy = std::sin(approach);
+    const double ux = mathutil::heading_cos(approach);
+    const double uy = mathutil::heading_sin(approach);
     const double nx = -uy;
     const double ny = ux;
     const double xi0 = dx * ux + dy * uy;
@@ -590,7 +591,7 @@ inline GraphPath quarticHermiteThrough(double rx, double ry, double tx, double t
 
     if (std::fabs(xi0) < kOnAxisM || std::fabs(eta0) < kOnAxisM) {
         path.length_m = dist;
-        if (xi0 > 0.0) path.phi = std::atan2(ty - ry, tx - rx);
+        if (xi0 > 0.0) path.phi = mathutil::direction_heading(tx - rx, ty - ry);
         return path;
     }
 
@@ -639,15 +640,15 @@ inline Quintic hermiteThrough(double rx, double ry, double tx, double ty, double
     double tx0 = 0.0;
     double ty0 = 0.0;
     if (dir < 1e-9) {
-        tx0 = std::cos(approach);
-        ty0 = std::sin(approach);
+        tx0 = mathutil::heading_cos(approach);
+        ty0 = mathutil::heading_sin(approach);
         kappa0 = 0.0;
     } else {
         tx0 = vx / dir;
         ty0 = vy / dir;
     }
-    const double ux = std::cos(approach);
-    const double uy = std::sin(approach);
+    const double ux = mathutil::heading_cos(approach);
+    const double uy = mathutil::heading_sin(approach);
     const double nx = -ty0;
     const double ny = tx0;
 
@@ -682,7 +683,7 @@ inline Quintic hermiteThrough(double rx, double ry, double tx, double ty, double
     const double ddpx = 20.0 * (path.px[2] - 2.0 * path.px[1] + path.px[0]);
     const double ddpy = 20.0 * (path.py[2] - 2.0 * path.py[1] + path.py[0]);
     const double speed2 = dpx * dpx + dpy * dpy;
-    path.phi = std::atan2(dpy, dpx);
+    path.phi = mathutil::direction_heading(dpx, dpy);
     if (speed2 > 1e-12) {
         const double speed = std::sqrt(speed2);
         path.kappa = (dpx * ddpy - dpy * ddpx) / (speed2 * speed);
@@ -1072,9 +1073,10 @@ inline void measureBand(TimedBand& band) {
     const int n = band.count;
     if (n < 2) return;
     double seg[kTebPoses];
-    seg[0] = std::atan2(band.y[1] - band.y[0], band.x[1] - band.x[0]);
+    seg[0] = mathutil::direction_heading(band.x[1] - band.x[0], band.y[1] - band.y[0]);
     for (int i = 1; i < n - 1; ++i) {
-        const double raw = std::atan2(band.y[i + 1] - band.y[i], band.x[i + 1] - band.x[i]);
+        const double raw = mathutil::direction_heading(band.x[i + 1] - band.x[i],
+                                                       band.y[i + 1] - band.y[i]);
         seg[i] = seg[i - 1] + mathutil::normalize_angle(raw - seg[i - 1]);
     }
     band.s[0] = 0.0;
@@ -1346,7 +1348,8 @@ inline void clearCuspCurvature(TimedBand& band) {
 // Nose heading of the chord from pose i to i+1. Reverse travel faces the
 // other way, so the mean of the two nose headings is the chord plus π.
 inline double chordNose(const TimedBand& band, int i) {
-    const double travel = std::atan2(band.y[i + 1] - band.y[i], band.x[i + 1] - band.x[i]);
+    const double travel = mathutil::direction_heading(band.x[i + 1] - band.x[i],
+                                                      band.y[i + 1] - band.y[i]);
     if (band.drive[i] < 0.0) return mathutil::normalize_angle(travel + Robot::PI);
     return travel;
 }
@@ -1365,8 +1368,8 @@ inline void syncHeadings(TimedBand& band, const TebLimits& lim) {
         chord[i] = chord[i - 1] + mathutil::normalize_angle(raw - chord[i - 1]);
     }
     band.theta[0] = lim.nose;
-    const double exit_travel = std::atan2(band.y[n - 1] - band.y[n - 2],
-                                          band.x[n - 1] - band.x[n - 2]);
+    const double exit_travel = mathutil::direction_heading(band.x[n - 1] - band.x[n - 2],
+                                                          band.y[n - 1] - band.y[n - 2]);
     double exit_nose = exit_travel;
     if (lim.finish_drive < 0.0) exit_nose = mathutil::normalize_angle(exit_travel + Robot::PI);
     const double last = chord[n - 2];
@@ -1854,8 +1857,8 @@ inline void pinExit(TimedBand& band, double tx, double ty, double approach, doub
     if (hold < 1e-4) hold = 1e-4;
     band.x[n - 1] = tx;
     band.y[n - 1] = ty;
-    band.x[n - 2] = tx - hold * std::cos(approach);
-    band.y[n - 2] = ty - hold * std::sin(approach);
+    band.x[n - 2] = tx - hold * mathutil::heading_cos(approach);
+    band.y[n - 2] = ty - hold * mathutil::heading_sin(approach);
 }
 
 // Pose 1 has to lead the direction of travel. A knot the robot has already
@@ -1863,8 +1866,8 @@ inline void pinExit(TimedBand& band, double tx, double ty, double approach, doub
 inline bool leadTheNose(TimedBand& band, const TebLimits& lim) {
     const int n = band.count;
     if (n < 3) return false;
-    const double hx = std::cos(lim.motion);
-    const double hy = std::sin(lim.motion);
+    const double hx = mathutil::heading_cos(lim.motion);
+    const double hy = mathutil::heading_sin(lim.motion);
     auto lead = [&](int i) {
         return (band.x[i] - band.x[0]) * hx + (band.y[i] - band.y[0]) * hy;
     };
@@ -1950,8 +1953,8 @@ inline bool retainTimedBand(TimedBand& band, double rx, double ry,
     if (n0 < 5 || n0 > kTebPoses) return false;
     if (std::hypot(band.x[n0 - 1] - tx, band.y[n0 - 1] - ty) > 0.30) return false;
     if (band.drive[n0 - 1] * lim.finish_drive < 0.0) return false;
-    const double exit = std::atan2(band.y[n0 - 1] - band.y[n0 - 2],
-                                   band.x[n0 - 1] - band.x[n0 - 2]);
+    const double exit = mathutil::direction_heading(band.x[n0 - 1] - band.x[n0 - 2],
+                                                   band.y[n0 - 1] - band.y[n0 - 2]);
     if (std::fabs(mathutil::normalize_angle(exit - approach)) > 0.80) return false;
 
     double best = 1e9;
@@ -2057,8 +2060,8 @@ inline TimedBand swingCusp(double rx, double ry, double tx, double ty, double ap
     const double reach = std::hypot(gx, gy);
     if (reach < 0.08) return band;
     const double rev = mathutil::normalize_angle(lim.motion + Robot::PI);
-    const double rxu = std::cos(rev);
-    const double ryu = std::sin(rev);
+    const double rxu = mathutil::heading_cos(rev);
+    const double ryu = mathutil::heading_sin(rev);
     const double lx = -side * ryu;
     const double ly = side * rxu;
     // A short bow. A wider one loses to the half-turn on the chord, because
@@ -2073,8 +2076,8 @@ inline TimedBand swingCusp(double rx, double ry, double tx, double ty, double ap
 
     const double d1 = 0.40 * std::hypot(cx - rx, cy - ry);
     const double d2 = 0.40 * std::hypot(tx - cx, ty - cy);
-    const double ex = std::cos(approach);
-    const double ey = std::sin(approach);
+    const double ex = mathutil::heading_cos(approach);
+    const double ey = mathutil::heading_sin(approach);
     const double a1x = rx + d1 * rxu;
     const double a1y = ry + d1 * ryu;
     const double b1x = cx - d1 * lx;
@@ -2115,10 +2118,10 @@ inline TimedBand swingCusp(double rx, double ry, double tx, double ty, double ap
 inline TimedBand cuspBand(double rx, double ry, double tx, double ty, double approach,
                           const TebLimits& lim) {
     TimedBand band;
-    const double nx = std::cos(lim.motion);
-    const double ny = std::sin(lim.motion);
-    const double ex = std::cos(approach);
-    const double ey = std::sin(approach);
+    const double nx = mathutil::heading_cos(lim.motion);
+    const double ny = mathutil::heading_sin(lim.motion);
+    const double ex = mathutil::heading_cos(approach);
+    const double ey = mathutil::heading_sin(approach);
     const double gx = tx - rx;
     const double gy = ty - ry;
     const double reach = std::hypot(gx, gy);
@@ -2154,8 +2157,8 @@ inline TimedBand cuspBand(double rx, double ry, double tx, double ty, double app
             // A straight chord would be a half turn. Reverse off to one side
             // and come in forward, the same basin ROS TEB seeds when the
             // goal sits behind the nose.
-            const double nose_x = std::cos(lim.nose);
-            const double nose_y = std::sin(lim.nose);
+            const double nose_x = mathutil::heading_cos(lim.nose);
+            const double nose_y = mathutil::heading_sin(lim.nose);
             const double along_nose = gx * nose_x + gy * nose_y;
             const double exit_nose = ex * nose_x + ey * nose_y;
             if (along_nose < -0.05 && exit_nose < -0.5) {
@@ -2223,14 +2226,14 @@ inline void openingRay(double rx, double ry, double tx, double ty,
                        double vx, double vy, const TebLimits& lim,
                        double& t0x, double& t0y) {
     const double dir = std::hypot(vx, vy);
-    t0x = std::cos(lim.motion);
-    t0y = std::sin(lim.motion);
+    t0x = mathutil::heading_cos(lim.motion);
+    t0y = mathutil::heading_sin(lim.motion);
     if (dir >= 1e-9) {
         t0x = vx / dir;
         t0y = vy / dir;
     }
-    const double nose_x = std::cos(lim.nose);
-    const double nose_y = std::sin(lim.nose);
+    const double nose_x = mathutil::heading_cos(lim.nose);
+    const double nose_y = mathutil::heading_sin(lim.nose);
     const double goal_along = (tx - rx) * nose_x + (ty - ry) * nose_y;
     if (lim.v_start < kMomentumSpeed && lim.finish_drive < 0.0 && goal_along < 0.05) {
         t0x = -nose_x;
@@ -2310,8 +2313,8 @@ inline TimedBand relaxSeed(TimedBand band, double approach, double t0x, double t
     band.y[n - 1] = ty;
     if (n >= 4) {
         const double dist = std::hypot(rx - tx, ry - ty);
-        const double ux = std::cos(approach);
-        const double uy = std::sin(approach);
+        const double ux = mathutil::heading_cos(approach);
+        const double uy = mathutil::heading_sin(approach);
         double handle = dist / static_cast<double>(n - 1);
         if (handle < kTebMinSegM) handle = kTebMinSegM;
         if (handle > 0.22 * dist) handle = 0.22 * dist;
@@ -2366,8 +2369,8 @@ inline TimedBand timedBandThrough(double rx, double ry, double tx, double ty,
     const double dx = rx - tx;
     const double dy = ry - ty;
     const double dist = std::hypot(rx - tx, ry - ty);
-    const double ux = std::cos(approach);
-    const double uy = std::sin(approach);
+    const double ux = mathutil::heading_cos(approach);
+    const double uy = mathutil::heading_sin(approach);
     const double nx = -uy;
     const double ny = ux;
     const double xi0 = dx * ux + dy * uy;
@@ -2384,7 +2387,7 @@ inline TimedBand timedBandThrough(double rx, double ry, double tx, double ty,
     if (dist < 1e-3) return chooseCusp(finishStraight(approach), rx, ry, tx, ty, approach, lim);
     if (std::fabs(xi0) < kOnAxisM || std::fabs(eta0) < kOnAxisM) {
         double phi = approach;
-        if (xi0 > 0.0) phi = std::atan2(ty - ry, tx - rx);
+        if (xi0 > 0.0) phi = mathutil::direction_heading(tx - rx, ty - ry);
         return chooseCusp(finishStraight(phi), rx, ry, tx, ty, approach, lim);
     }
 

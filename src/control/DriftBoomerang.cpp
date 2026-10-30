@@ -1,5 +1,5 @@
 /* ---------------------------------------------------------------------------
- * DriftBoomerang.cpp  --  boomerang carrot, centripetal sideslip, volt command.
+ * DriftBoomerang.cpp  --  boomerang carrot, centripetal sideslip, velocity command.
  * ------------------------------------------------------------------------- */
 #include "control/DriftBoomerang.h"
 #include "core/Tuning.h"
@@ -8,10 +8,6 @@
 #include <cmath>
 
 namespace {
-
-double voltsPerPower() {
-    return System::MAX_VOLTS / Controller::FULL_SCALE;
-}
 
 // LemLib PID::update, derivative per tick. Windup is in the error's units.
 double pidTick(double error, double kP, double kI, double kD, double windup,
@@ -33,14 +29,13 @@ double slewToward(double target, double current, double max_step) {
 }
 
 // Carrot `lead * dist` behind the target, opposite the approach heading.
-// In this codebase heading 0 is +X and CCW is positive, which is already
-// LemLib's "standard form", so there is no VEX-heading conversion here.
+// Heading 0 is +Y and CCW is positive. There is no VEX-heading conversion.
 void carrotOf(double rx, double ry, double tx, double ty, double approach,
               double lead, double& cx, double& cy) {
     const double dist = std::hypot(tx - rx, ty - ry);
     const double back = lead * dist;
-    cx = tx - back * std::cos(approach);
-    cy = ty - back * std::sin(approach);
+    cx = tx - back * mathutil::heading_cos(approach);
+    cy = ty - back * mathutil::heading_sin(approach);
 }
 
 } // namespace
@@ -84,16 +79,16 @@ ChassisCommand DriftBoomerang::compute(const StateEstimate& state, const Pose2d&
     const double cdy = cy - ry;
     const double carrot_dist = std::hypot(cdx, cdy);
     // Bearing the velocity should travel. At the point itself, hold the approach.
-    const double phi = (carrot_dist < 1e-4) ? approach : std::atan2(cdy, cdx);
+    const double phi = (carrot_dist < 1e-4) ? approach : mathutil::direction_heading(cdx, cdy);
 
     // κ = dφ/ds along the carrot bearing. Positive is a left (CCW) bend.
     double kappa = 0.0;
     if (!close && carrot_dist > Drift::CARROT_FLOOR_M && dist > Drift::CARROT_FLOOR_M) {
-        const double rx2 = rx + Drift::PROBE_M * std::cos(phi);
-        const double ry2 = ry + Drift::PROBE_M * std::sin(phi);
+        const double rx2 = rx + Drift::PROBE_M * mathutil::heading_cos(phi);
+        const double ry2 = ry + Drift::PROBE_M * mathutil::heading_sin(phi);
         double cx2, cy2;
         carrotOf(rx2, ry2, tx, ty, approach, config.lead, cx2, cy2);
-        const double phi2 = std::atan2(cy2 - ry2, cx2 - rx2);
+        const double phi2 = mathutil::direction_heading(cx2 - rx2, cy2 - ry2);
         kappa = mathutil::normalize_angle(phi2 - phi) / Drift::PROBE_M;
     }
 
@@ -110,7 +105,7 @@ ChassisCommand DriftBoomerang::compute(const StateEstimate& state, const Pose2d&
     if (close) psi = goal.theta;
     goal_heading_ = psi;
 
-    const double along_in = ((cx - rx) * std::cos(theta) + (cy - ry) * std::sin(theta))
+    const double along_in = ((cx - rx) * mathutil::heading_cos(theta) + (cy - ry) * mathutil::heading_sin(theta))
                             / kMetersPerInch;
     const double heading_deg = mathutil::normalize_angle(psi - theta) * (180.0 / Robot::PI);
 
@@ -121,36 +116,33 @@ ChassisCommand DriftBoomerang::compute(const StateEstimate& state, const Pose2d&
     settled_ = (dist / kMetersPerInch) < small_in
             && std::fabs(heading_to_goal_deg) < small_deg;
 
-    const double scale = voltsPerPower();
+    const double lin_per_power = Robot::MAX_VEL_LIN / Controller::FULL_SCALE;
+    const double yaw_per_power = Robot::MAX_VEL_ANG / Controller::FULL_SCALE;
     double surge = pidTick(along_in,
                            Boomerang::Lateral.kP, Boomerang::Lateral.kI,
                            Boomerang::Lateral.kD, Boomerang::Lateral.windup,
-                           i_lin_, prev_lin_, primed_) * scale;
+                           i_lin_, prev_lin_, primed_) * lin_per_power;
     double yaw = pidTick(heading_deg,
                          Boomerang::Angular.kP, Boomerang::Angular.kI,
                          Boomerang::Angular.kD, Boomerang::Angular.windup,
-                         i_ang_, prev_ang_, primed_) * scale;
+                         i_ang_, prev_ang_, primed_) * yaw_per_power;
     primed_ = true;
 
-    const double max_v = config.max_volts;
-    surge = mathutil::clamp_val(surge, -max_v, max_v);
-    yaw   = mathutil::clamp_val(yaw, -max_v, max_v);
+    surge = mathutil::clamp_val(surge, -Robot::MAX_VEL_LIN, Robot::MAX_VEL_LIN);
+    yaw = mathutil::clamp_val(yaw, -Robot::MAX_VEL_ANG, Robot::MAX_VEL_ANG);
 
-    const double slew = Boomerang::Lateral.slew * scale;
+    const double slew = Boomerang::Lateral.slew * lin_per_power;
     surge = slewToward(surge, prev_surge_, slew);
-
-    // Angular effort wins the voltage budget, same priority as LemLib's overturn.
-    const double overturn = std::fabs(yaw) + std::fabs(surge) - max_v;
-    if (overturn > 0.0) surge -= std::copysign(overturn, surge);
 
     if (config.forwards && surge < 0.0) surge = 0.0;
     if (!config.forwards && surge > 0.0) surge = 0.0;
     prev_surge_ = surge;
 
     ChassisCommand cmd;
-    cmd.linear  = surge;
+    cmd.request = DriveRequest::Motion;
+    cmd.linear = surge;
     cmd.lateral = 0.0;
     cmd.angular = yaw;
-    cmd.brake   = false;
+    cmd.brake = false;
     return cmd;
 }

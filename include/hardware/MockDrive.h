@@ -73,8 +73,9 @@ public:
 
     PlantSnapshot plantSnapshot() const;
 
-    // Place the plant. Wheel speeds match v_lin and v_ang. Does not draw a
-    // new sensor-error sample, so a training reset stays deterministic.
+    // Place the plant. Wheel speeds match v_lin and v_ang. The reported
+    // heading matches theta, with the IMU offset left at zero. Does not draw
+    // a new sensor-error sample, so a training reset stays deterministic.
     void setPlant(double x_in, double y_in, double theta,
                   double v_lin, double v_lat, double v_ang);
 
@@ -86,6 +87,20 @@ public:
     // firmware build does not call this.
     void setDynamics(double velocity_tau_sec, double skid_tau_sec,
                      double side_resistance_ohm, double speed_scale);
+
+    // Per-axis mismatch on top of that lag. Friction is volts removed before
+    // the axis can accelerate (forward volts, and V_R - V_L for yaw). A
+    // velocity scale multiplies settled speed. An acceleration scale divides
+    // the lag, so 2 reaches the same speed in half the time. Ones and zeros
+    // are the compiled plant, and training never calls this.
+    void setAxisResponse(double lin_friction_v, double lin_vel_scale, double lin_accel_scale,
+                         double ang_friction_v, double ang_vel_scale, double ang_accel_scale);
+
+    // Ticks between the voltage applyDrive stored and the lag that integrates
+    // it. Zero is the compiled plant. The field window is what moves it;
+    // training leaves it alone, so a late command can oscillate a tuned loop
+    // on the host without changing a search.
+    void setVoltageDelayTicks(int ticks);
 
     // The plant the critic is allowed to see. The actor does not.
     struct Dynamics {
@@ -123,6 +138,26 @@ private:
     double skid_tau_ = MockPlant::SKID_TAU_SEC;
     double side_resistance_ = MockPlant::SIDE_RESISTANCE_OHM;
     double speed_scale_ = MockPlant::SPEED_SCALE;
+    // Identity leaves both wheels on one shared lag. service() copies the
+    // field-window sliders here; a training step never does.
+    double lin_friction_v_ = 0.0;
+    double ang_friction_v_ = 0.0;
+    double lin_vel_scale_ = 1.0;
+    double ang_vel_scale_ = 1.0;
+    double lin_accel_scale_ = 1.0;
+    double ang_accel_scale_ = 1.0;
+    double responseSpeedLimit() const;
+    bool axisResponseIsIdentity() const;
+
+    // Newest command sits at delay_head_. A delay of N ticks reads N slots
+    // behind that, so the lag sees an older voltage. The cap leaves one
+    // slot between the write and the oldest read.
+    static constexpr int kVoltageDelayCap = 16;
+    int voltage_delay_ticks_ = 0;
+    int delay_head_ = 0;
+    double delay_left_[kVoltageDelayCap]{};
+    double delay_right_[kVoltageDelayCap]{};
+    void delayCommand(double& left_v, double& right_v);
 
     // Forward-kinematics memory (meters) and simulated IMU.
     double prev_l_ = 0.0, prev_r_ = 0.0;
@@ -150,6 +185,10 @@ private:
     double imu_rotation_deg_ = 0.0;   // get_rotation(), clockwise positive
     double imu_plant_heading_ = 0.0;
     bool imu_scaled_ = false;
+    // Heading last published before the domain test unplugged the IMU.
+    // Cleared once the port is connected again.
+    bool imu_held_ = false;
+    double imu_held_heading_ = 0.0;
 
     // Last distance sample. A new one is taken every kRangePeriodTicks.
     int dist_mm_[kDistanceChannels]{};
@@ -172,6 +211,12 @@ private:
     void stepCascade(double dt_seconds);
 
     void applyCurrentLimit(double& left_v, double& right_v, double v_lin, double v_ang) const;
+
+    // Previous velocity command, so a caller that omitted accel still gets kA.
+    // A logged step passes Volts and does not update this.
+    double volt_surge_ = 0.0;
+    double volt_yaw_ = 0.0;
+    bool volt_primed_ = false;
     void ensureSensorScales();
     void resetImuIntegration();
     double reportedRotationDeg() const;

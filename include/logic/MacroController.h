@@ -4,7 +4,8 @@
  * four-trigger replay abort, and the subsystem behavior. R1/R2 run the intake
  * (MAIN1 and MAIN2 opposite). L1/L2 run the cascade (both the same way).
  * L1+L2 toggles the claw (pneumatic B). R1+R2 toggles pneumatic G. D-pad
- * Right starts the scoring macro. Owns the pneumatics latch.
+ * Right starts the scoring macro. B alone drives to the nearest match
+ * loader. Owns the pneumatics latch.
  * ------------------------------------------------------------------------- */
 
 #include "core/Types.h"

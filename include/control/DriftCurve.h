@@ -159,6 +159,7 @@
 #include "core/Tuning.h"
 #include "interfaces/IFeedForward.h"
 #include "math/MathUtils.h"
+#include "math/TrackingCenter.h"
 #include <cmath>
 #include <math.h>
 #include <optional>
@@ -188,7 +189,7 @@ struct DriftCurveConfig {
 };
 
 // One drive. x and y are inches, the same frame localization publishes.
-// exit_direction is the field heading of the velocity at the target (0 = +X,
+// exit_direction is the field heading of the velocity at the target (0 = +Y,
 // CCW positive). exit_speed is m/s along that direction; 0 stops. max_accel
 // is the most the speed may change, in m/s^2. Leave it unset to use
 // config.path_accel. line_length is the straight finish into the target, in
@@ -210,6 +211,8 @@ struct DriftCurveTarget {
     // Latched swing. The plan is the orbit about the goal, and the command
     // presses into the point while yawing onto exit heading. See PathConstraints.
     bool turn_on_goal = false;
+    // Tracking: x and y are the front bumper. Rotation: they are the yaw centre.
+    CommandPoint point = CommandPoint::Tracking;
 
     // heading is the nose. v along the nose becomes exit_speed; negative v
     // reverses, so the travel direction is opposite the nose.
@@ -226,10 +229,25 @@ struct DriftCurveTarget {
         target.ignore_direction = path.ignore_heading;
         target.backwards = reverse;
         target.turn_on_goal = path.turn_on_goal;
+        target.point = path.point;
         if (path.max_accel_mps2 >= 0.0) target.max_accel = path.max_accel_mps2;
         return target;
     }
 };
+
+// Meters. A tracking command names the front bumper; the plan is the yaw
+// centre, shifted back along the nose by the recorded offset. An orbit
+// already splits those two points itself.
+inline DriftCurveTarget rotationTarget(DriftCurveTarget target) {
+    if (target.point != CommandPoint::Tracking || target.turn_on_goal) return target;
+    const double nose = target.backwards
+        ? mathutil::normalize_angle(target.exit_direction + Robot::PI)
+        : target.exit_direction;
+    const Pose2d center = tracking::centerFromTracking(Pose2d{target.x, target.y, nose});
+    target.x = center.x;
+    target.y = center.y;
+    return target;
+}
 
 // Public target is inches. Path fitting and braking run in meters.
 inline DriftCurveTarget targetInMeters(const DriftCurveTarget& field) {
@@ -247,8 +265,8 @@ public:
 
     void reset();
 
-    // Chassis model for the speed rule. Null leaves the linear volts at
-    // zero. The pointer is not owned.
+    // Kept so callers can still pass a model. The drive base owns the VAS
+    // conversion. The pointer is not used and is not owned.
     void bindFeedforward(const IFeedForward* model) { model_ = model; }
 
     // state : field pose, forward speed (v_lin, m/s), yaw rate (v_ang, rad/s).

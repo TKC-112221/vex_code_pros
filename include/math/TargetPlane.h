@@ -8,6 +8,7 @@
  * ------------------------------------------------------------------------- */
 
 #include "core/Types.h"
+#include "math/MathUtils.h"
 #include <cmath>
 
 namespace mathutil {
@@ -30,8 +31,8 @@ inline Vec2 mul(const Mat2& m, const Vec2& v) {
 
 // World vector -> frame whose x-axis points along `heading`.
 inline Mat2 worldToFrame(double heading) {
-    const double c = std::cos(heading);
-    const double s = std::sin(heading);
+    const double c = heading_cos(heading);
+    const double s = heading_sin(heading);
     return { c, s, -s, c };
 }
 
@@ -44,8 +45,8 @@ inline double targetPlaneAlong(const Pose2d& pose, const Pose2d& plane) {
 // Nose speed (m/s) projected onto the plane normal. Positive moves through it.
 inline double targetPlaneNoseSpeed(const Pose2d& pose, double v_lin, const Pose2d& plane) {
     const Mat2 frame = worldToFrame(plane.theta);
-    const Vec2 velocity = mul(frame, Vec2{v_lin * std::cos(pose.theta),
-                                          v_lin * std::sin(pose.theta)});
+    const Vec2 velocity = mul(frame, Vec2{v_lin * heading_cos(pose.theta),
+                                          v_lin * heading_sin(pose.theta)});
     return velocity.x;
 }
 

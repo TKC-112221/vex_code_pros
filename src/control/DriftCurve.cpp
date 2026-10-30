@@ -1,5 +1,5 @@
 /* ---------------------------------------------------------------------------
- * DriftCurve.cpp  --  curve tangent at the target, centripetal sideslip, volts.
+ * DriftCurve.cpp  --  curve tangent at the target, centripetal sideslip, velocity.
  * ------------------------------------------------------------------------- */
 #include "control/DriftCurve.h"
 #include "control/DriftPathFit.h"
@@ -11,10 +11,6 @@
 using namespace driftpath;
 
 namespace {
-
-double voltsPerPower() {
-    return System::MAX_VOLTS / Controller::FULL_SCALE;
-}
 
 // LemLib PID::update, derivative per tick. Windup is in the error's units.
 double pidTick(double error, double kP, double kI, double kD, double windup,
@@ -44,7 +40,7 @@ int DriftCurve::samplePath(const Pose2d& from_in, Pose2d* out, int cap,
     const double dist = std::hypot(target.x - from.x, target.y - from.y);
     double approach = target.exit_direction;
     if (target.ignore_direction && dist > 1e-4) {
-        approach = std::atan2(target.y - from.y, target.x - from.x);
+        approach = mathutil::direction_heading(target.x - from.x, target.y - from.y);
     }
     const Pose2d end{target.x, target.y, approach};
     const Finish fin = finishOf(from.x, from.y, target.x, target.y,
@@ -185,7 +181,7 @@ ChassisCommand DriftCurve::compute(const StateEstimate& state) {
     const double dist = std::hypot(tx - rx, ty - ry);
     double approach = target.exit_direction;
     if (target.ignore_direction && dist > 1e-4) {
-        approach = std::atan2(ty - ry, tx - rx);
+        approach = mathutil::direction_heading(tx - rx, ty - ry);
     }
     const bool forwards = config.forwards && !target.backwards;
     const double nose = forwards
@@ -330,36 +326,23 @@ ChassisCommand DriftCurve::compute(const StateEstimate& state) {
 
     const double v_cmd = v_cmd_slew;
     const double a_cmd = a_cmd_slew;
-    double omega = v_ref * kappa;
-    double radius = Physics::TURN_RADIUS_MAX_M;
-    if (std::fabs(kappa) > Motion::KAPPA_EPS) radius = 1.0 / std::fabs(kappa);
-    if (radius > Physics::TURN_RADIUS_MAX_M) radius = Physics::TURN_RADIUS_MAX_M;
+    const double omega = v_ref * kappa;
+    (void)model_;
 
-    double surge = 0.0;
-    if (model_ != nullptr) {
-        surge = model_->linearVolts(v_cmd, a_cmd, std::fabs(v_cmd), std::fabs(a_cmd),
-                                    omega, radius);
-    }
-
-    const double scale = voltsPerPower();
-    double yaw = pidTick(heading_deg,
-                         Boomerang::Angular.kP, Boomerang::Angular.kI,
-                         Boomerang::Angular.kD, Boomerang::Angular.windup,
-                         i_ang_, prev_ang_, primed_) * scale;
+    // LemLib power, scaled onto free yaw speed. The drive's VAS makes the volts.
+    const double yaw_per_power = Robot::MAX_VEL_ANG / Controller::FULL_SCALE;
+    const double yaw = omega + pidTick(heading_deg,
+                                       Boomerang::Angular.kP, Boomerang::Angular.kI,
+                                       Boomerang::Angular.kD, Boomerang::Angular.windup,
+                                       i_ang_, prev_ang_, primed_) * yaw_per_power;
     primed_ = true;
 
-    const double max_v = config.max_volts;
-    surge = mathutil::clamp_val(surge, -max_v, max_v);
-    yaw   = mathutil::clamp_val(yaw, -max_v, max_v);
-
-    // Angular effort wins the voltage budget, same priority as LemLib's overturn.
-    const double overturn = std::fabs(yaw) + std::fabs(surge) - max_v;
-    if (overturn > 0.0) surge -= std::copysign(overturn, surge);
-
     ChassisCommand cmd;
-    cmd.linear  = surge;
+    cmd.request = DriveRequest::Motion;
+    cmd.linear = std::isfinite(v_cmd) ? v_cmd : 0.0;
+    cmd.accel = std::isfinite(a_cmd) ? a_cmd : 0.0;
+    cmd.angular = std::isfinite(yaw) ? yaw : 0.0;
     cmd.lateral = 0.0;
-    cmd.angular = yaw;
-    cmd.brake   = false;
+    cmd.brake = false;
     return cmd;
 }

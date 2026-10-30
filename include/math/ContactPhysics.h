@@ -21,7 +21,7 @@
 struct ContactBody {
     double x_m = 0;
     double y_m = 0;
-    double theta = 0;   // radians, unwrapped. 0 = +x, CCW positive
+    double theta = 0;   // radians, unwrapped. 0 = +y, CCW positive
     double v_fwd = 0;   // m/s, body forward
     double v_lat = 0;   // m/s, body left
     double omega = 0;   // rad/s, CCW

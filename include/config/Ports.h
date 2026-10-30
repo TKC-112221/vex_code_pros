@@ -19,8 +19,8 @@ namespace Ports {
 
     // Sensors
     constexpr int IMU = 10;
-    // Distance sensors. Beam geometry lives in Robot::Range::MOUNT
-    // (D1 front, D2 right, D3 rear, D4 left).
+    // Distance sensors. Offsets from the tracking centre live in
+    // Robot::Range::TRACKING_OFFSET (D1 front, D2 right, D3 rear, D4 left).
     constexpr int D1 = 17;
     constexpr int D2 = 18;
     constexpr int D3 = 19;
@@ -29,10 +29,10 @@ namespace Ports {
     // Subsystems (smart ports).
     // MAIN1 and MAIN2 share a differential: the same spin powers the cascade,
     // the opposite spin powers the intake. SUB1 and SUB2 are held off.
-    constexpr int MAIN1 = 4;
-    constexpr int MAIN2 = 5;
-    constexpr int SUB1  = 8;
-    constexpr int SUB2  = 9;
+    constexpr int MAIN1 = 8;
+    constexpr int MAIN2 = -9;
+    constexpr int SUB1  = 4;
+    constexpr int SUB2  = 5;
 
     // Pneumatics (ADI ports: 'A'=1 ... 'H'=8)
     constexpr int PNEUMATICS_G = 7;   // 'G'

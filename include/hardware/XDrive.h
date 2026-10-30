@@ -77,4 +77,9 @@ protected:
     void fillImuChannels(double prev_heading_rad, ChassisObservation& o);
     // Measured tick length. A gap rebases encoder baselines via `gap`.
     double takeSampleDt(bool& gap);
+
+    // Previous velocity command. ParenthesisDrive shares it.
+    double volt_surge_ = 0.0;
+    double volt_yaw_ = 0.0;
+    bool volt_primed_ = false;
 };

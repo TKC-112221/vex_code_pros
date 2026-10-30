@@ -88,7 +88,7 @@ ChassisCommand CascadedController::computeCommand(const Pose2d& pose_in,
         ? (Gains::SPATIAL_WARP_M / spatial_error) : 1.0;
     double v_ref_warped = target.velocity.vx * s_factor;
     double omega_ref_warped = omega_ref * s_factor;
-    double s_sq = s_factor * s_factor;
+    (void)feedforward_;
 
     // 4. Velocity setpoints: Ramsete OR pure reference + position PID.
     double v_cmd, omega_cmd;
@@ -149,52 +149,46 @@ ChassisCommand CascadedController::computeCommand(const Pose2d& pose_in,
     double a_cmd = ekf_.get_a_cmd_est();
     double alpha_cmd = ekf_.get_alpha_cmd_est();
 
-    double vol_lin_ff, vol_lat_ff, vol_ang_ff;
-    if (CT::USE_RECORDED_VOLTS) {
-        // Recorded chassis effort as feedforward base (0 in teleop -> PID-only).
-        vol_lin_ff = target.ref_linear_effort;
-        vol_lat_ff = target.ref_lateral_effort;
-        vol_ang_ff = target.ref_angular_effort;
-    } else {
-        double turn_radius = (std::fabs(omega_cmd) < Physics::OMEGA_EPS) ? Physics::TURN_RADIUS_MAX_M
-                           : std::min(std::fabs(v_cmd) / (std::fabs(omega_cmd) + Physics::OMEGA_EPS), Physics::TURN_RADIUS_MAX_M);
-        vol_lin_ff = feedforward_->linearVolts(v_cmd, a_cmd * s_sq, std::fabs(v_cmd),
-                                               std::fabs(a_cmd * s_sq), omega_cmd, turn_radius);
-        vol_lat_ff = 0.0;  // no lateral dynamics model yet
-        vol_ang_ff = feedforward_->angularVolts(omega_cmd, alpha_cmd * s_sq, std::fabs(v_cmd),
-                                                std::fabs(a_cmd * s_sq), turn_radius);
-    }
-
-    // 6. Velocity PID feedback on EKF-smoothed velocity/derivatives.
-    double v_est = ekf_.get_v_est();
-    double omega_est = ekf_.get_omega_est();
-    double v_error = v_cmd - v_est;
-    integral_error_lin = integral_error_lin * PidGains::Velocity::Linear.iDecay + v_error * dt;
-    integral_error_lin = clamp_val(integral_error_lin, -5.0, 5.0);
-    double deriv_lin = ekf_.get_deriv_lin();
-    prev_error_lin = v_error;
-
-    double omega_error = omega_cmd - omega_est;
-    integral_error_ang = integral_error_ang * PidGains::Velocity::Angular.iDecay + omega_error * dt;
-    integral_error_ang = clamp_val(integral_error_ang, -5.0, 5.0);
-    double deriv_ang = ekf_.get_deriv_ang();
-    prev_error_ang = omega_error;
-
-    double vol_pid_lin = PidGains::Velocity::Linear.kP * v_error
-                       + PidGains::Velocity::Linear.kI * integral_error_lin
-                       + PidGains::Velocity::Linear.kD * deriv_lin;
-    double vol_pid_ang = PidGains::Velocity::Angular.kP * omega_error
-                       + PidGains::Velocity::Angular.kI * integral_error_ang
-                       + PidGains::Velocity::Angular.kD * deriv_ang;
-
-    // 7. Combine feedforward + feedback into a chassis-frame effort.
-    //    (Angular effort predicts V_R - V_L, halved to apply per side downstream.)
     ChassisCommand cmd;
-    cmd.linear  = vol_lin_ff * Gains::FF_BOOST_LIN + vol_pid_lin;
-    cmd.lateral = vol_lat_ff;  // passthrough recorded lateral; no lateral PID yet
-    cmd.angular = (vol_ang_ff * Gains::FF_BOOST_ANG + vol_pid_ang) / 2.0;
-    // Stick-zero brake is a per-actuator hardware behavior; the DriveBase
-    // decides it from joystick idle + wheel velocity (see TankDrive).
+    if (CT::USE_RECORDED_VOLTS) {
+        // A logged voltage is already the motor command. The drive base
+        // applies it unchanged. The velocity PID still trims that voltage.
+        double v_est = ekf_.get_v_est();
+        double omega_est = ekf_.get_omega_est();
+        double v_error = v_cmd - v_est;
+        integral_error_lin = integral_error_lin * PidGains::Velocity::Linear.iDecay + v_error * dt;
+        integral_error_lin = clamp_val(integral_error_lin, -5.0, 5.0);
+        double deriv_lin = ekf_.get_deriv_lin();
+        prev_error_lin = v_error;
+
+        double omega_error = omega_cmd - omega_est;
+        integral_error_ang = integral_error_ang * PidGains::Velocity::Angular.iDecay + omega_error * dt;
+        integral_error_ang = clamp_val(integral_error_ang, -5.0, 5.0);
+        double deriv_ang = ekf_.get_deriv_ang();
+        prev_error_ang = omega_error;
+
+        double vol_pid_lin = PidGains::Velocity::Linear.kP * v_error
+                           + PidGains::Velocity::Linear.kI * integral_error_lin
+                           + PidGains::Velocity::Linear.kD * deriv_lin;
+        double vol_pid_ang = PidGains::Velocity::Angular.kP * omega_error
+                           + PidGains::Velocity::Angular.kI * integral_error_ang
+                           + PidGains::Velocity::Angular.kD * deriv_ang;
+        cmd.request = DriveRequest::Volts;
+        cmd.linear = target.ref_linear_effort * Gains::FF_BOOST_LIN + vol_pid_lin;
+        cmd.lateral = target.ref_lateral_effort;
+        cmd.angular = (target.ref_angular_effort * Gains::FF_BOOST_ANG + vol_pid_ang) / 2.0;
+    } else {
+        integral_error_lin = 0.0;
+        integral_error_ang = 0.0;
+        prev_error_lin = 0.0;
+        prev_error_ang = 0.0;
+        cmd.request = DriveRequest::Motion;
+        cmd.linear = v_cmd;
+        cmd.lateral = 0.0;
+        cmd.angular = omega_cmd;
+        cmd.accel = a_cmd;
+        cmd.alpha = alpha_cmd;
+    }
 
     spatial_error_ = spatial_error;
     angular_error_ = e_theta;

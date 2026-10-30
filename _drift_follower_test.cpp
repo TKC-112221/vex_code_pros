@@ -1,11 +1,22 @@
 #include "control/DriftFollower.h"
 #include "control/DriftPathFit.h"
+#include "core/Tuning.h"
 #include "interfaces/IFeedForward.h"
 #include "math/MathUtils.h"
+#include "math/TrackingCenter.h"
 #include <cmath>
 #include <cstdio>
 
 static int g_fails = 0;
+
+// Field heading is 0 along +y. These are the headings of +x and -x.
+constexpr double kEast = -M_PI / 2.0;
+constexpr double kWest = M_PI / 2.0;
+
+// The field line is the rotation centre. A command pose is the bumper.
+static Pose2d centreOf(const Pose2d& tracked_in) {
+    return poseMetersToInches(tracking::centerFromTracking(poseInchesToMeters(tracked_in)));
+}
 
 static void expect(bool ok, const char* msg) {
     if (ok) return;
@@ -24,23 +35,26 @@ int main() {
     nav.config.lat_kD2 = 0.0;
     nav.target.x = metersToInches(1.0);
     nav.target.y = 0.0;
-    nav.target.exit_direction = 0.0;
+    nav.target.exit_direction = kEast;
     nav.target.exit_speed = 0.0;
     nav.target.line_length = 0.0;
     nav.reset();
 
     StateEstimate st;
-    st.pose = {0.0, metersToInches(0.4), 0.0};
+    st.pose = {0.0, metersToInches(0.4), kEast};
     nav.compute(st);
 
     Pose2d path[64];
     const int n = nav.samplePath({9.0, 9.0, 0.0}, path, 64, 0.0, 0.0);
     expect(n >= 8, "quartic sample count");
-    expect(std::hypot(path[0].x - 0.0, path[0].y - metersToInches(0.4)) < 1e-4,
-           "plan starts at the pose");
-    expect(std::hypot(path[n - 1].x - metersToInches(1.0), path[n - 1].y - 0.0) < 1e-3,
-           "plan ends at the target");
-    expect(std::fabs(path[n - 1].theta) < 0.05, "quartic arrives on the exit heading");
+    const Pose2d start = centreOf(Pose2d{0.0, metersToInches(0.4), kEast});
+    const Pose2d end = centreOf(Pose2d{metersToInches(1.0), 0.0, kEast});
+    expect(std::hypot(path[0].x - start.x, path[0].y - start.y) < 1e-4,
+           "plan starts at the rotation centre");
+    expect(std::hypot(path[n - 1].x - end.x, path[n - 1].y - end.y) < 1e-3,
+           "plan ends at the rotation centre");
+    expect(std::fabs(mathutil::normalize_angle(path[n - 1].theta - kEast)) < 0.05,
+           "quartic arrives on the exit heading");
 
     Pose2d again[64];
     const int n2 = nav.samplePath({9.0, 9.0, 0.0}, again, 64);
@@ -48,21 +62,33 @@ int main() {
     expect(std::hypot(again[0].x - path[0].x, again[0].y - path[0].y) < 1e-9, "frozen start");
 
     const int mid = n / 2;
-    const double nx = -std::sin(path[mid].theta);
-    const double ny = std::cos(path[mid].theta);
-    st.pose = {path[mid].x + metersToInches(0.10) * nx,
-               path[mid].y + metersToInches(0.10) * ny, path[mid].theta};
+    const double nx = -mathutil::heading_sin(path[mid].theta);
+    const double ny = mathutil::heading_cos(path[mid].theta);
+    const Pose2d on = poseInchesToMeters(path[mid]);
+    st.pose = poseMetersToInches(tracking::trackingFromCenter(
+        Pose2d{on.x + 0.10 * nx, on.y + 0.10 * ny, path[mid].theta}));
     st.v_lin = 0.4;
     // The first tick after the teleport is the heading D-term. The next tick
     // is the cross-track loop with that derivative settled.
     nav.compute(st);
     const ChassisCommand cmd = nav.compute(st);
-    std::printf("off-path yaw %.3f goal %.3f\n", cmd.angular, nav.goalHeading());
-    expect(cmd.angular < -1.0, "left of the path steers clockwise");
+    DriftFollower centered;
+    centered.config = nav.config;
+    centered.target = nav.target;
+    StateEstimate on_st;
+    on_st.pose = {0.0, metersToInches(0.4), kEast};
+    on_st.v_lin = 0.4;
+    centered.compute(on_st);
+    on_st.pose = poseMetersToInches(tracking::trackingFromCenter(on));
+    centered.compute(on_st);
+    const ChassisCommand on_cmd = centered.compute(on_st);
+    std::printf("off-path yaw %.3f on-path %.3f\n", cmd.angular, on_cmd.angular);
+    expect(cmd.request == DriveRequest::Motion, "off-path command is a velocity");
+    expect(cmd.angular < on_cmd.angular - 0.05, "left of the path steers clockwise");
 
     nav.reset();
     nav.config.shape = DriftCurveShape::Arc;
-    st.pose = {0.0, metersToInches(0.5), 0.0};
+    st.pose = {0.0, metersToInches(0.5), kEast};
     nav.compute(st);
     const int na = nav.samplePath(st.pose, path, 64);
     expect(na >= 8, "arc sample count");
@@ -73,14 +99,15 @@ int main() {
     nav.reset();
     nav.config.shape = DriftCurveShape::Hermite;
     nav.target.line_length = metersToInches(0.3);
-    st.pose = {0.0, metersToInches(0.2), 0.4};
+    st.pose = {0.0, metersToInches(0.2), kEast + 0.4};
     st.v_lin = 1.0;
     st.v_ang = 0.3;
     nav.compute(st);
     const int nh = nav.samplePath(st.pose, path, 64, st.v_lin, st.v_ang);
     expect(nh >= 8, "hermite sample count");
-    expect(std::hypot(path[nh - 1].x - metersToInches(1.0), path[nh - 1].y) < 1e-3,
-           "hermite ends at the target");
+    const Pose2d hermite_end = centreOf(Pose2d{metersToInches(1.0), 0.0, kEast});
+    expect(std::hypot(path[nh - 1].x - hermite_end.x, path[nh - 1].y - hermite_end.y) < 1e-3,
+           "hermite ends at the rotation centre");
 
     nav.reset();
     nav.config.shape = DriftCurveShape::Exponential;
@@ -106,7 +133,7 @@ int main() {
     nav.config.max_slip_rad = M_PI / 2.0;
     nav.target.line_length = 0.0;
     nav.target.exit_speed = 0.0;
-    st.pose = {0.0, metersToInches(0.5), 0.0};
+    st.pose = {0.0, metersToInches(0.5), kEast};
     st.v_lin = 1.5;
     st.v_ang = 0.0;
     nav.compute(st);
@@ -123,25 +150,27 @@ int main() {
     nav.config.centripetal_accel = 6.0;
     nav.target.line_length = 0.0;
     nav.target.exit_speed = 0.0;
-    nav.target.exit_direction = 0.0;
+    nav.target.exit_direction = kEast;
     nav.target.x = metersToInches(1.6);
     nav.target.y = 0.0;
-    st.pose = {0.0, metersToInches(0.45), 0.0};
+    st.pose = {0.0, metersToInches(0.45), kEast};
     st.v_lin = 2.0;
     st.v_ang = 1.5;
     nav.compute(st);
     const int nt = nav.samplePath(st.pose, path, 64, st.v_lin, st.v_ang);
     expect(nt >= 8, "timed elastic sample count");
-    expect(std::hypot(path[0].x, path[0].y - metersToInches(0.45)) < 1e-3,
-           "timed elastic starts at the pose");
-    expect(std::hypot(path[nt - 1].x - metersToInches(1.6), path[nt - 1].y) < 1e-2,
-           "timed elastic ends at the target");
-    expect(std::fabs(mathutil::normalize_angle(path[nt - 1].theta)) < 0.2,
+    const Pose2d elastic_start = centreOf(Pose2d{0.0, metersToInches(0.45), kEast});
+    const Pose2d elastic_end = centreOf(Pose2d{metersToInches(1.6), 0.0, kEast});
+    expect(std::hypot(path[0].x - elastic_start.x, path[0].y - elastic_start.y) < 1e-3,
+           "timed elastic starts at the rotation centre");
+    expect(std::hypot(path[nt - 1].x - elastic_end.x, path[nt - 1].y - elastic_end.y) < 1e-2,
+           "timed elastic ends at the rotation centre");
+    expect(std::fabs(mathutil::normalize_angle(path[nt - 1].theta - kEast)) < 0.2,
            "timed elastic arrives on the exit heading");
 
     {
         using namespace driftpath;
-        const double rx = 0.0, ry = 0.45, tx = 1.6, ty = 0.0, approach = 0.0;
+        const double rx = 0.0, ry = 0.45, tx = 1.6, ty = 0.0, approach = kEast;
         const double v = 2.0;
         const double kappa0 = 4.0;
         const TebLimits lim = tebLimits(v, 0.0, v, 2.0, 3.0, 0.0);
@@ -153,10 +182,13 @@ int main() {
                "band ends at the join");
         const double end_dx = band.x[band.count - 1] - band.x[band.count - 2];
         const double end_dy = band.y[band.count - 1] - band.y[band.count - 2];
-        expect(std::fabs(std::atan2(end_dy, end_dx) - approach) < 0.05,
+        expect(std::fabs(mathutil::normalize_angle(
+                   mathutil::direction_heading(end_dx, end_dy) - approach)) < 0.05,
                "last segment is the exit direction");
-        const double phi0 = std::atan2(band.y[1] - band.y[0], band.x[1] - band.x[0]);
-        expect(std::fabs(phi0) < 0.05, "first segment follows the momentum");
+        const double phi0 = mathutil::direction_heading(band.x[1] - band.x[0],
+                                                        band.y[1] - band.y[0]);
+        expect(std::fabs(mathutil::normalize_angle(phi0 - kEast)) < 0.05,
+               "first segment follows the momentum");
         double peak = 0.0;
         double demand = 0.0;
         for (int i = 0; i < band.count; ++i) {
@@ -196,8 +228,8 @@ int main() {
         expect(v_fast > v_slow + 0.2, "a higher centripetal budget holds more speed");
 
         // Goal behind the nose, arrive still facing forward: back past it, then in.
-        const TebLimits ahead = tebLimits(0.0, 0.0, 2.0, 2.0, 6.0, 0.0, 0.0, 1.0, 0.0);
-        const TimedBand cusp = timedBandThrough(0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, ahead);
+        const TebLimits ahead = tebLimits(0.0, 0.0, 2.0, 2.0, 6.0, 0.0, kEast, 1.0, 0.0);
+        const TimedBand cusp = timedBandThrough(0.0, 0.0, -1.0, 0.0, kEast, 0.0, 0.0, 0.0, ahead);
         bool reversed = false;
         bool past = false;
         for (int i = 0; i < cusp.count; ++i) {
@@ -214,25 +246,26 @@ int main() {
 
         // On the heading axis the band is the chord, and the target speed
         // falls from the brake ceiling to the exit speed.
-        const TebLimits line_lim = tebLimits(0.0, 0.0, 2.0, 2.0, 6.0, 0.0);
-        const TimedBand line = timedBandThrough(0.0, 0.0, 2.0, 0.0, 0.0, 1.0, 0.0, 0.0, line_lim);
+        const TebLimits line_lim = tebLimits(0.0, 0.0, 2.0, 2.0, 6.0, 0.0, kEast);
+        const TimedBand line = timedBandThrough(0.0, 0.0, 2.0, 0.0, kEast, 1.0, 0.0, 0.0, line_lim);
         expect(line.count >= 2, "straight band has poses");
         expect(line.v[0] > 1.5, "straight band leaves near the brake speed");
         expect(line.v[line.count - 1] < 0.05, "straight band arrives stopped");
 
         // Whole move is reverse: leave toward the goal, nose still facing +x.
-        const TebLimits backing = tebLimits(0.0, 0.0, 2.0, 2.0, 6.0, 0.0, 0.0, -1.0, 0.0);
-        const TimedBand back = timedBandThrough(0.0, 0.0, -1.0, 0.0, M_PI, 1.0, 0.0, 0.0, backing);
+        const TebLimits backing = tebLimits(0.0, 0.0, 2.0, 2.0, 6.0, 0.0, kEast, -1.0, 0.0);
+        const TimedBand back = timedBandThrough(0.0, 0.0, -1.0, 0.0, kWest, 1.0, 0.0, 0.0, backing);
         expect(back.count >= 2 && back.drive[0] < 0.0, "reverse finish opens going backward");
-        const double leave = std::atan2(back.y[1] - back.y[0], back.x[1] - back.x[0]);
-        expect(std::fabs(mathutil::normalize_angle(leave - M_PI)) < 0.25,
+        const double leave = mathutil::direction_heading(back.x[1] - back.x[0],
+                                                         back.y[1] - back.y[0]);
+        expect(std::fabs(mathutil::normalize_angle(leave - kWest)) < 0.25,
                "reverse finish leaves toward the goal");
 
         // A few degrees of heading error on a forward goal is a curve,
         // not a reversal. The line intersection sits behind the goal, and
         // taking it makes the command flip sign every tick.
-        const TebLimits offset = tebLimits(0.4, 0.0, 2.0, 4.0, 12.0, 0.0, 0.3, 1.0, 0.0);
-        const TimedBand nudged = timedBandThrough(0.0, 0.05, 1.0, 0.0, 0.0,
+        const TebLimits offset = tebLimits(0.4, 0.0, 2.0, 4.0, 12.0, 0.0, kEast + 0.3, 1.0, 0.0);
+        const TimedBand nudged = timedBandThrough(0.0, 0.05, 1.0, 0.0, kEast,
                                                  std::cos(0.3), std::sin(0.3), 0.0, offset);
         bool backed = false;
         for (int i = 0; i < nudged.count; ++i) if (nudged.drive[i] < 0.0) backed = true;
@@ -241,20 +274,20 @@ int main() {
 
         // Heading stays +x while the robot is backing up. The opening
         // follows that travel, not the nose.
-        TebLimits moving = tebLimits(0.8, 0.0, 2.0, 2.0, 6.0, 0.0, 0.0, 1.0, 0.0);
-        moving.motion = M_PI;
-        const TimedBand backing_off = timedBandThrough(0.0, 0.45, 1.2, 0.0, 0.0,
+        TebLimits moving = tebLimits(0.8, 0.0, 2.0, 2.0, 6.0, 0.0, kEast, 1.0, 0.0);
+        moving.motion = kWest;
+        const TimedBand backing_off = timedBandThrough(0.0, 0.45, 1.2, 0.0, kEast,
                                                        -1.0, 0.0, 0.0, moving);
-        const double open = std::atan2(backing_off.y[1] - backing_off.y[0],
-                                       backing_off.x[1] - backing_off.x[0]);
-        expect(std::fabs(mathutil::normalize_angle(open - M_PI)) < 0.35,
+        const double open = mathutil::direction_heading(backing_off.x[1] - backing_off.x[0],
+                                                        backing_off.y[1] - backing_off.y[0]);
+        expect(std::fabs(mathutil::normalize_angle(open - kWest)) < 0.35,
                "opening follows the movement, not the heading");
 
         // Nose and travel point the same way, the goal is behind both, and
         // the exit faces the other way. Reverse off to one side, then in.
-        TebLimits flip = tebLimits(0.6, 0.6, Robot::MAX_VEL_LIN, 6.0, 12.0, 0.0, M_PI, 1.0, 0.0);
-        flip.motion = M_PI;
-        const TimedBand swung = timedBandThrough(0.0, 0.0, 1.0, 0.0, 0.0,
+        TebLimits flip = tebLimits(0.6, 0.6, Robot::MAX_VEL_LIN, 6.0, 12.0, 0.0, kWest, 1.0, 0.0);
+        flip.motion = kWest;
+        const TimedBand swung = timedBandThrough(0.0, 0.0, 1.0, 0.0, kEast,
                                                  std::cos(M_PI), std::sin(M_PI), 0.0, flip);
         bool swung_back = false;
         bool swung_fwd = false;
@@ -295,17 +328,18 @@ int main() {
     nav.config.timed_elastic = true;
     nav.target.x = metersToInches(1.6);
     nav.target.y = 0.0;
-    nav.target.exit_direction = 0.0;
+    nav.target.exit_direction = kEast;
     nav.target.exit_speed = 0.0;
-    st.pose = {0.0, metersToInches(0.45), 0.0};
+    st.pose = {0.0, metersToInches(0.45), kEast};
     st.v_lin = 0.0;
     st.v_ang = 0.0;
     nav.compute(st);
-    st.pose = {metersToInches(0.40), metersToInches(0.20), 0.0};
+    st.pose = {metersToInches(0.40), metersToInches(0.20), kEast};
     nav.compute(st);
     const int nrefit = nav.samplePath({9.0, 9.0, 0.0}, path, 64, 0.0, 0.0);
     expect(nrefit >= 2, "committed plan still has a path");
-    expect(std::hypot(path[0].x - 0.0, path[0].y - metersToInches(0.45)) < 1e-2,
+    const Pose2d kept = centreOf(Pose2d{0.0, metersToInches(0.45), kEast});
+    expect(std::hypot(path[0].x - kept.x, path[0].y - kept.y) < 1e-2,
            "timed elastic keeps the plan from the first pose");
 
     // Too fast into a reversal: the band's target speed is the brake to the
@@ -338,24 +372,25 @@ int main() {
         nav.config.lat_kD2 = 0.0;
         nav.target.x = metersToInches(-0.40);
         nav.target.y = 0.0;
-        nav.target.exit_direction = 0.0;
+        nav.target.exit_direction = kEast;
         nav.target.exit_speed = 0.0;
         nav.target.line_length = 0.0;
-        const TebLimits lim = tebLimits(0.0, 0.0, 4.0, 2.0, 6.0, 0.0, 0.0, 1.0, 0.0);
-        const TimedBand band = timedBandThrough(0.0, 0.0, -0.40, 0.0, 0.0, 0.0, 0.0, 0.0, lim);
+        const TebLimits lim = tebLimits(0.0, 0.0, 4.0, 2.0, 6.0, 0.0, kEast, 1.0, 0.0);
+        const TimedBand band = timedBandThrough(0.0, 0.0, -0.40, 0.0, kEast, 0.0, 0.0, 0.0, lim);
         expect(band.count >= 2 && band.drive[0] < 0.0, "follower case opens in reverse");
         expect(band.v[0] > 0.4 && band.v[0] < 3.5, "reversal ceiling is a real brake speed");
-        st.pose = {0.0, 0.0, 0.0};
+        st.pose = {0.0, 0.0, kEast};
         st.v_lin = -(band.v[0] + 0.20);
         st.v_ang = 0.0;
         const ChassisCommand braking = nav.compute(st);
         std::printf("cusp brake linear %.3f band_v0 %.3f v_lin %.3f\n",
                     braking.linear, band.v[0], st.v_lin);
-        expect(braking.linear > 0.5, "overspeed into a reversal brakes");
+        expect(braking.request == DriveRequest::Motion, "the brake is a velocity");
+        expect(braking.accel > 0.5, "overspeed into a reversal brakes");
     }
 
-    // Latched on the (24, 24) in goal, nose along +x. A quarter turn to +y
-    // rides the orbit and presses forward while yawing CCW.
+        // Front middle on the (24, 24) in goal, nose along +x. A quarter turn
+        // to +y rides the center around that point and presses while yawing.
     {
         nav.reset();
         nav.config.timed_elastic = true;
@@ -366,27 +401,27 @@ int main() {
         nav.target.turn_on_goal = true;
         nav.target.x = gx;
         nav.target.y = gy;
-        nav.target.exit_direction = Robot::PI / 2.0;
+        nav.target.exit_direction = 0.0;
         nav.target.exit_speed = 0.0;
         nav.target.line_length = 0.0;
         nav.target.backwards = false;
-        st.pose = {gx - half_in, gy, 0.0};
+        st.pose = {gx, gy, kEast};
         st.v_lin = 0.0;
         st.v_ang = 0.0;
         const ChassisCommand swing = nav.compute(st);
         std::printf("goal turn surge %.3f yaw %.3f\n", swing.linear, swing.angular);
-        expect(swing.linear > 6.0, "goal turn presses into the goal");
-        expect(swing.angular > 3.0, "goal turn yaws toward the heading");
-        expect(swing.linear > std::fabs(swing.angular), "inside wheel stays forward");
-        expect(std::fabs(swing.linear) + std::fabs(swing.angular) <= nav.config.max_volts + 1e-6,
-               "goal turn fits the rail");
+        const double half = Robot::Chassis::TRACK_WIDTH_M * 0.5;
+        expect(std::fabs(swing.linear - GoalAlign::TURN_SURGE_MPS) < 1e-9,
+               "goal turn presses into the goal");
+        expect(swing.angular > 0.5, "goal turn yaws toward the heading");
+        expect(swing.linear > std::fabs(swing.angular) * half, "inside wheel stays forward");
         const int ng = nav.samplePath(st.pose, path, 64);
         expect(ng >= 8, "goal turn samples");
-        expect(std::hypot(path[0].x - st.pose.x, path[0].y - st.pose.y) < 1e-3,
-               "goal turn starts seated");
+        expect(std::hypot(path[0].x - (gx - half_in), path[0].y - gy) < 1e-3,
+               "goal turn starts with the center behind the front");
         expect(std::hypot(path[ng - 1].x - gx, path[ng - 1].y - (gy - half_in)) < 1e-2,
                "goal turn ends on the orbit");
-        expect(std::fabs(mathutil::normalize_angle(path[ng - 1].theta - Robot::PI / 2.0)) < 1e-3,
+        expect(std::fabs(mathutil::normalize_angle(path[ng - 1].theta)) < 1e-3,
                "goal turn faces the target heading");
         bool on_orbit = true;
         for (int i = 0; i < ng; ++i) {
@@ -396,18 +431,20 @@ int main() {
         expect(on_orbit, "goal turn keeps the nose on the goal");
 
         nav.reset();
-        nav.target.exit_direction = -Robot::PI / 2.0;
+        nav.target.exit_direction = -Robot::PI;
         const ChassisCommand clockwise = nav.compute(st);
-        expect(clockwise.linear > 6.0, "clockwise goal turn still presses");
-        expect(clockwise.angular < -3.0, "clockwise goal turn yaws the other way");
+        expect(std::fabs(clockwise.linear - GoalAlign::TURN_SURGE_MPS) < 1e-9,
+               "clockwise goal turn still presses");
+        expect(clockwise.angular < -0.5, "clockwise goal turn yaws the other way");
 
         nav.reset();
-        nav.target.exit_direction = 0.0;
+        nav.target.exit_direction = kEast;
         expect(!nav.settled(), "goal turn is not settled before it runs");
         ChassisCommand held{};
         for (int i = 0; i < 12; ++i) held = nav.compute(st);
         expect(std::fabs(held.angular) < 1e-6, "settled goal turn drops yaw");
-        expect(held.linear > 6.0, "settled goal turn keeps the press");
+        expect(std::fabs(held.linear - GoalAlign::TURN_SURGE_MPS) < 1e-9,
+               "settled goal turn keeps the press");
         expect(nav.settled(), "goal turn settles on the heading");
     }
 
@@ -433,11 +470,11 @@ int main() {
         nav.config.head_kD = 0.0;
         nav.target.x = metersToInches(1.0);
         nav.target.y = 0.0;
-        nav.target.exit_direction = 0.0;
+        nav.target.exit_direction = kEast;
         nav.target.exit_speed = 0.0;
         nav.target.line_length = 0.0;
         nav.target.turn_on_goal = false;
-        st.pose = {0.0, metersToInches(0.5), 0.0};
+        st.pose = {0.0, metersToInches(0.5), kEast};
         st.v_lin = 1.0;
         st.v_ang = 0.0;
         const ChassisCommand by_curvature = nav.compute(st);
@@ -482,10 +519,10 @@ int main() {
         nav.target.turn_on_goal = false;
         nav.target.x = 40.0;
         nav.target.y = 0.0;
-        nav.target.exit_direction = 0.0;
+        nav.target.exit_direction = kEast;
         nav.target.exit_speed = 0.0;
         nav.target.line_length = 0.0;
-        st.pose = {0.0, 0.0, 0.0};
+        st.pose = {0.0, 0.0, kEast};
         st.v_lin = 0.0;
         st.v_ang = 0.0;
         nav.compute(st);
@@ -502,7 +539,7 @@ int main() {
         expect(nav.settled(), "near-zero speed finishes short of the target");
 
         nav.reset();
-        st.pose = {0.0, 0.0, 0.0};
+        st.pose = {0.0, 0.0, kEast};
         st.v_lin = 0.0;
         nav.compute(st);
         st.pose.x = 20.0;
@@ -514,7 +551,7 @@ int main() {
         expect(nav.settled(), "growing distance finishes while still moving");
 
         nav.reset();
-        st.pose = {40.0, 0.0, 0.0};
+        st.pose = {40.0, 0.0, kEast};
         st.v_lin = 0.0;
         nav.compute(st);
         expect(nav.settled(), "already on the target finishes");

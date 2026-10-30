@@ -37,9 +37,9 @@ void calibrateRobotSensors(IDriveBase& drive,
     if (ui) ui->displayMessage("CALIBRATING...");
     drive.stop();
 
-    // Hardcoded sensor calibration sequence. Today this is IMU reset via the
-    // drivebase; extend here when additional sensors need an explicit init.
-    // begin returns immediately; the wait lives in finish.
+    // IMU reset via the drive. begin returns immediately; the wait lives
+    // in finish. Distance sensors are probed in initialize and do not
+    // block this sequence.
     drive.beginSensorCalibration();
     finishRobotSensorCalibration(drive, estimator, processor,
                                  loc_mutex, prev_heading, obs_pending);

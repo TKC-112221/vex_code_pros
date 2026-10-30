@@ -8,8 +8,9 @@
  * OdometryEstimator).
  *
  * getState(), overridePose(), sampleParticles(), and the optional absolute
- * fixes use field inches. update() still takes chassis travel and ranges in
- * meters; each filter keeps that geometry internally and converts here.
+ * fixes use field inches. The pose is the middle of the front bumper.
+ * update() still takes the geometric center's travel and ranges in meters;
+ * each filter keeps that geometry internally and converts here.
  * ------------------------------------------------------------------------- */
 
 #include "core/Types.h"
@@ -21,6 +22,10 @@ public:
     virtual void initialize() {}
     virtual void reset() = 0;
     virtual void overridePose(const Pose2d& pose) = 0;
+
+    // Published body speed. A routine that places the robot at rest calls
+    // this after overridePose so the next snapshot is stopped.
+    virtual void clearVelocity() {}
 
     // Advance the estimate with one sensor dict. Encoder deltas in
     // sensors.chassis must be applied exactly once.

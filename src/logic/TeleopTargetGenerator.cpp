@@ -67,8 +67,8 @@ TeleopDrive TeleopTargetGenerator::generate(RobotMode mode, const JoystickData& 
             tether_ang = (ang_err_val < 0.17) ? 1.0 : (0.17 / ang_err_val);
         }
         const double step_in = target_v * DT * kInchesPerMeter * tether_lin * tether_ang;
-        vt_x_ += step_in * std::cos(vt_theta_);
-        vt_y_ += step_in * std::sin(vt_theta_);
+        vt_x_ += step_in * mathutil::heading_cos(vt_theta_);
+        vt_y_ += step_in * mathutil::heading_sin(vt_theta_);
         vt_theta_ += target_w * DT * tether_lin * tether_ang;
     }
 

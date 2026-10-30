@@ -5,8 +5,9 @@
  * Set the endpoint with DriftCurveTarget::fromMotion on a MotionPose
  * (x, y, heading, speed), then set g_drift_curve_on.
  * g_drift_curve_abort stops it. The default target
- * is a stop at the origin, leaving along +X. A alone while idle or recording
- * arms whatever target is currently stored.
+ * is a stop at the origin, leaving along +Y. A alone while idle or recording
+ * arms whatever target is currently stored. That drive routes around the
+ * align goals.
  * ------------------------------------------------------------------------- */
 
 #include "control/DriftCurve.h"

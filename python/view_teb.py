@@ -54,8 +54,8 @@ def chassis_corners(x, y, theta):
         (-half_l, -half_w),
         (-half_l, half_w),
     )
-    c = math.cos(theta)
-    s = math.sin(theta)
+    c = -math.sin(theta)
+    s = math.cos(theta)
     return [
         (x + px * c - py * s, y + px * s + py * c)
         for px, py in local
@@ -74,7 +74,7 @@ def segment_headings(points):
             headings.append(prev)
             reversals.append(False)
             continue
-        heading = math.atan2(dy, dx)
+        heading = math.atan2(dy, dx) - math.pi / 2.0
         reversals.append(prev is not None and abs(wrap(heading - prev)) > _REVERSAL_RAD)
         headings.append(heading)
         prev = heading
@@ -215,7 +215,7 @@ class BandProbe:
 def draw_heading(ax, x, y, theta, color, length):
     ax.annotate(
         "",
-        xy=(x + length * math.cos(theta), y + length * math.sin(theta)),
+        xy=(x + length * (-math.sin(theta)), y + length * math.cos(theta)),
         xytext=(x, y),
         arrowprops={"arrowstyle": "->", "color": color, "lw": 1.6},
         zorder=6,
@@ -238,8 +238,8 @@ def draw_band(ax, points):
         if heading is None or i % 2 != 0:
             continue
         ax.plot(
-            [x0, x0 + 3.0 * math.cos(heading)],
-            [y0, y0 + 3.0 * math.sin(heading)],
+            [x0, x0 + 3.0 * (-math.sin(heading))],
+            [y0, y0 + 3.0 * math.cos(heading)],
             color="#148f77", linewidth=0.8, zorder=3,
         )
 
@@ -277,8 +277,8 @@ def draw(ax, probe, base, band):
     nose = 0.5 * _BODY_LENGTH_IN + 2.0
     draw_heading(
         ax,
-        probe.start[0] + nose * math.cos(start_theta),
-        probe.start[1] + nose * math.sin(start_theta),
+        probe.start[0] + nose * (-math.sin(start_theta)),
+        probe.start[1] + nose * math.cos(start_theta),
         start_theta, "#1a365d", 10.0,
     )
     ax.plot(probe.goal[0], probe.goal[1], marker="x", color="#922b21", markersize=9, zorder=5)
@@ -526,11 +526,11 @@ class BandWindow:
 def main():
     parser = argparse.ArgumentParser(description="Preview the timed elastic band from a start pose to a goal")
     parser.add_argument(
-        "--start", nargs=3, type=float, metavar=("X", "Y", "DEG"), default=(0.0, 72.0, 0.0),
+        "--start", nargs=3, type=float, metavar=("X", "Y", "DEG"), default=(0.0, 72.0, -90.0),
         help="start x in, y in, heading deg. Default is the field center, facing +x.",
     )
     parser.add_argument(
-        "--goal", nargs=3, type=float, metavar=("X", "Y", "DEG"), default=(36.0, 96.0, 68.8),
+        "--goal", nargs=3, type=float, metavar=("X", "Y", "DEG"), default=(36.0, 96.0, -21.2),
         help="goal x in, y in, exit heading deg",
     )
     parser.add_argument("--v", type=float, default=0.0, help="start speed, m/s")

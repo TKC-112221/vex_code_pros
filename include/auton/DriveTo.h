@@ -25,10 +25,14 @@
  *
  * afterTravel() is a subcommand: the move keeps going, and the action starts
  * once this leg has covered that much odometry.
- * The move is the deadline, so a still-running action is cancelled when the
- * pose is reached and cannot hold the chassis. then() is also a subcommand,
- * and it runs after the move finishes, before the routine starts the next
- * DriveTo. Several of either decorator stack, in the order they were added.
+ * The move is the deadline. The group keeps running while a side command
+ * is still going, and once the move has arrived it stops publishing that
+ * move's drive. A gate that has not fired yet runs when the move arrives,
+ * so it does not wait for travel the chassis will not cover. A macro that
+ * takes the chassis also pauses the move, and the move replans when the
+ * macro gives the drive back. then() runs after that group finishes,
+ * before the routine starts the next leg. A move that gave up skips
+ * then(). Several of either decorator stack, in the order they were added.
  * ------------------------------------------------------------------------- */
 
 #include "auton/CommandGroups.h"
@@ -100,6 +104,16 @@ private:
         if (model) model_ = model;
     }
 
+    // Reflect this leg across the field centerline. Call before compose():
+    // the folded command keeps the target it was built with.
+    void mirror() {
+        target_.x = -target_.x;
+        target_.heading = mathutil::normalize_angle(-target_.heading);
+        target_.omega = -target_.omega;
+        const int n = path_.obstacle_n < kPathObstacles ? path_.obstacle_n : kPathObstacles;
+        for (int i = 0; i < n; ++i) path_.obstacles[i].x = -path_.obstacles[i].x;
+    }
+
     // Fold decorators into one command: travel gates run beside the move,
     // and then() commands run after that group finishes.
     void compose() {
@@ -121,7 +135,7 @@ private:
             for (auto& command : after_) {
                 if (command) steps.push_back(std::move(command));
             }
-            motion = std::make_unique<SequentialCommandGroup>(std::move(steps));
+            motion = std::make_unique<SequentialCommandGroup>(std::move(steps), true);
         }
         impl_ = std::move(motion);
         composed_ = true;

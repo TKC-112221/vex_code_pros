@@ -50,8 +50,8 @@ def chassis_corners(x, y, theta):
         [[half_l, half_w], [half_l, -half_w], [-half_l, -half_w], [-half_l, half_w]],
         dtype=float,
     )
-    c = np.cos(theta)
-    s = np.sin(theta)
+    c = -np.sin(theta)
+    s = np.cos(theta)
     world = np.empty_like(local)
     world[:, 0] = x + local[:, 0] * c - local[:, 1] * s
     world[:, 1] = y + local[:, 0] * s + local[:, 1] * c
@@ -95,7 +95,7 @@ def planned_path(guide):
     sample = getattr(guide, "path", None) or getattr(guide, "base_path", None)
     if sample is None:
         return [], []
-    points = sample(START_X_IN, START_Y_IN, 0.0, 0.0, 0.0)
+    points = sample(START_X_IN, START_Y_IN, -math.pi / 2.0, 0.0, 0.0)
     if len(points) < 2:
         return [], []
     return [p[0] for p in points], [p[1] for p in points]
@@ -134,7 +134,7 @@ def rollout(guide, sim, values, goal, practice, ticks):
     guide.begin(tx, ty, heading, exit_speed, False, False, shape, timed_elastic)
     path_x, path_y = planned_path(guide)
     sim.localize_reset(
-        START_X_IN, START_Y_IN, 0.0, 0.0, 0.0, 0.0,
+        START_X_IN, START_Y_IN, -math.pi / 2.0, 0.0, 0.0, 0.0,
         localization_seed(practice, tx, ty, heading),
     )
     states = [sim.state()]

@@ -8,14 +8,22 @@ drift does not dominate. Wheel speed is the measurement. Pose is not.
 
 Stage 2 searches the knobs that move a rollout, all in one CMA-ES run:
     feedforward, path and practice accel, the slip model, the lateral
-    loop, and the heading trim. The saturation speed is not searched. It
+    loop, the heading trim, TurnTo's speed and accel caps, and the
+    segment follower's Stanley gains and pivot threshold. DriveTo's
+    curve leg is the drift rollout. DriveTo with segmentPath() is the
+    segment rollout. TurnTo is a pivot in place. The volts for all
+    three come from the same feedforward; the search does not fit a
+    second kV or kA for the pivot. The saturation speed is not searched. It
     is the plant's top speed, so the volts for a hold match the chassis
     that is actually rolling. A slower model cannot brake, and the plant
-    runs through the goal. The cost is time until the true plant pose
-    is inside FINISH_RADIUS_IN of the target, the yaw rate is within
-    FINISH_YAW_RAD_S of zero, and the distance to the target has started to
-    grow, plus the angle between the path tangent and the direction the
-    chassis is moving. That radius is much wider than the firmware settle
+    runs through the goal. The cost is the mean of three families, so a
+    pivot is not drowned by the longer drives. A drive family scores time
+    until the true plant pose is inside FINISH_RADIUS_IN of the target,
+    the yaw rate is within FINISH_YAW_RAD_S of zero, and the distance to
+    the target has started to grow, plus the angle between the path
+    tangent and the direction the chassis is moving. A pivot scores time
+    until the heading is inside FINISH_HEAD_DEG and the yaw rate is
+    inside that same band. That radius is much wider than the firmware settle
     band (SETTLE_IN, or SETTLE_LARGE_IN if it holds), which made the search
     creep in order to sit inside it. A stop and a fly-by use the same
     gate: the clock stops when the range opens inside the radius, not when
@@ -89,18 +97,38 @@ _FIELD_Y_MIN_IN = 0.0
 _FIELD_Y_MAX_IN = 144.0
 GOALS = (
     # x in, y in, exit heading rad, exit speed m/s, base shape, timed elastic
-    (48.0, 72.0, 0.0, 0.0, "Hermite", True),       # straight stop
-    (36.0, 96.0, 1.2, 0.0, "Hermite", True),       # forward-left
-    (24.0, 54.0, -0.6, 0.0, "Hermite", True),      # forward-right
-    (30.0, 82.0, 0.4, 0.4, "Hermite", True),       # fly-by
-    (8.0, 114.0, 1.5708, 0.0, "Hermite", True),    # left, exit facing +Y
-    (6.0, 32.0, -1.5708, 0.0, "Hermite", True),    # right, exit facing -Y
-    (42.0, 50.0, 2.4, 0.5, "Hermite", True),       # forward, large heading, fly-by
-    (20.0, 100.0, 3.1416, 0.0, "Hermite", True),   # ahead, arrive facing back
-    (-36.0, 72.0, 3.1416, 0.0, "Hermite", True),   # behind, facing back
-    (-24.0, 102.0, 1.5708, 0.0, "Hermite", True),  # behind-left, facing +Y
-    (-18.0, 44.0, -2.2, 0.0, "Hermite", True),     # behind-right
-    (-30.0, 84.0, 0.3, 0.0, "Hermite", True),      # behind, arrive facing forward
+    (48.0, 72.0, -math.pi / 2, 0.0, "Hermite", True),          # straight stop, facing +x
+    (36.0, 96.0, 1.2 - math.pi / 2, 0.0, "Hermite", True),    # forward-left
+    (24.0, 54.0, -0.6 - math.pi / 2, 0.0, "Hermite", True),   # forward-right
+    (30.0, 82.0, 0.4 - math.pi / 2, 0.4, "Hermite", True),    # fly-by
+    (8.0, 114.0, 0.0, 0.0, "Hermite", True),                  # left, exit facing +Y
+    (6.0, 32.0, -math.pi, 0.0, "Hermite", True),              # right, exit facing -Y
+    (42.0, 50.0, 2.4 - math.pi / 2, 0.5, "Hermite", True),    # forward, large heading, fly-by
+    (20.0, 100.0, math.pi / 2, 0.0, "Hermite", True),         # ahead, arrive facing back
+    (-36.0, 72.0, math.pi / 2, 0.0, "Hermite", True),         # behind, facing back
+    (-24.0, 102.0, 0.0, 0.0, "Hermite", True),                # behind-left, facing +Y
+    (-18.0, 44.0, -2.2 - math.pi / 2, 0.0, "Hermite", True),  # behind-right
+    (-30.0, 84.0, 0.3 - math.pi / 2, 0.0, "Hermite", True),   # behind, arrive facing forward
+)
+
+# DriveTo(segmentPath()). Same pose tuple as GOALS, plus an optional
+# keep-out (x in, y in, radius in) the polyline has to leave. The start
+# pose faces +x, so a target up the field makes the follower pivot first.
+SEGMENT_CASES = (
+    ((36.0, 72.0, -math.pi / 2, 0.0, "Hermite", True), None),
+    ((24.0, 108.0, 0.0, 0.0, "Hermite", True), None),
+    ((40.0, 84.0, -math.pi / 2, 0.35, "Hermite", True), None),
+    ((-20.0, 96.0, math.pi / 2, 0.0, "Hermite", True), None),
+    ((48.0, 72.0, -math.pi / 2, 0.0, "Hermite", True), (24.0, 72.0, 10.0)),
+)
+
+# TurnTo headings, radians, from the same start facing +x. Short, quarter,
+# and half turns. The chassis is not asked to drive.
+TURN_HEADINGS = (
+    -math.pi / 2 + 0.45,
+    0.0,
+    math.pi,
+    math.pi / 2,
 )
 
 
@@ -172,6 +200,11 @@ def nominal():
         "LAT_I_LIMIT": float(plant.LAT_I_LIMIT),
         "TURN_RADIUS_MAX": float(plant.TURN_RADIUS_MAX),
         "KAPPA_EPS": float(plant.KAPPA_EPS),
+        "TURN_MAX_VEL": float(plant.TURN_MAX_VEL),
+        "TURN_MAX_ACCEL": float(plant.TURN_MAX_ACCEL),
+        "STANLEY_K": float(plant.STANLEY_K),
+        "STANLEY_SOFT": float(plant.STANLEY_SOFT),
+        "PIVOT_RAD": float(plant.PIVOT_RAD),
     }
 
 
@@ -209,6 +242,11 @@ BOUNDS = {
     "LAT_I_LIMIT": (0.0, 6.0),
     "TURN_RADIUS_MAX": (2.0, 20.0),
     "KAPPA_EPS": (1.0e-4, 5.0e-3),
+    "TURN_MAX_VEL": (0.8, 12.0),
+    "TURN_MAX_ACCEL": (0.5, 24.0),
+    "STANLEY_K": (0.2, 8.0),
+    "STANLEY_SOFT": (0.05, 1.5),
+    "PIVOT_RAD": (0.25, 1.6),
 }
 
 # One search. These knobs all change the same rollout: volts for a planned
@@ -225,6 +263,8 @@ TRACK_KEYS = (
     "K_SLIP", "A_MAX", "MAX_SLIP_RAD", "CLOSE_IN",
     "HEAD_KP", "HEAD_KI", "HEAD_KD", "HEAD_WINDUP",
     "LAT_KP", "LAT_KI", "LAT_KD", "LAT_KD2", "LAT_I_LIMIT",
+    "TURN_MAX_VEL", "TURN_MAX_ACCEL",
+    "STANLEY_K", "STANLEY_SOFT", "PIVOT_RAD",
 )
 
 # Voltage is applied this many ticks late, so a derivative gain is chasing
@@ -260,6 +300,10 @@ def require_plant():
         missing.append("DriftGuide.path")
     if not hasattr(plant.DriftGuide, "base_path"):
         missing.append("DriftGuide.base_path")
+    if not hasattr(plant, "TurnGuide"):
+        missing.append("TurnGuide")
+    if not hasattr(plant, "SegmentGuide"):
+        missing.append("SegmentGuide")
     if not hasattr(plant.PlantSim, "localize_reset"):
         missing.append("PlantSim.localize_reset")
     for name in ("SETTLE_LARGE_IN", "SETTLE_LARGE_DEG", "SETTLE_SMALL_S", "SETTLE_LARGE_S"):
@@ -315,6 +359,28 @@ def configure(guide, values, practice_accel):
     )
 
 
+def configure_turn(guide, values):
+    ks_lin, kv_lin, ka_lin, ks_ang, kv_ang, ka_ang = feedforward(values)
+    guide.configure(
+        ks_lin, kv_lin, ka_lin, ks_ang, kv_ang, ka_ang,
+        values["TURN_MAX_VEL"], values["TURN_MAX_ACCEL"],
+    )
+
+
+def configure_segment(guide, values, practice_accel):
+    ks_lin, kv_lin, ka_lin, ks_ang, kv_ang, ka_ang = feedforward(values)
+    guide.configure(
+        ks_lin, kv_lin, ka_lin, ks_ang, kv_ang, ka_ang,
+        values["PATH_ACCEL"], values["MIN_ACCEL"],
+        values["HEAD_KP"], values["HEAD_KI"], values["HEAD_KD"], values["HEAD_WINDUP"],
+        values["STANLEY_K"], values["STANLEY_SOFT"], values["PIVOT_RAD"],
+        float(plant.SETTLE_SPEED),
+        float(plant.SETTLE_IN),
+        float(plant.SETTLE_DEG),
+        values["PRACTICE_ACCEL"] if practice_accel else -1.0,
+    )
+
+
 def localization_seed(practice, tx, ty, heading):
     """Fixed per goal, so every candidate is scored on the same sensor errors."""
     acc = 0x5EED1234
@@ -329,7 +395,7 @@ def delayed_step(sim, pending, surge, sway, yaw):
     """Apply the command from COMMAND_DELAY_TICKS ago. `pending` starts full of zeros."""
     pending.append((float(surge), float(sway), float(yaw)))
     old_surge, old_sway, old_yaw = pending.pop(0)
-    return sim.step(old_surge, old_sway, old_yaw)
+    return sim.step_velocity(old_surge, old_sway, old_yaw)
 
 
 def _polyline(points):
@@ -345,7 +411,7 @@ def _project(poly, x, y):
     t = np.clip(((x - px[:-1]) * dx + (y - py[:-1]) * dy) / length2, 0.0, 1.0)
     dist2 = (x - (px[:-1] + t * dx)) ** 2 + (y - (py[:-1] + t * dy)) ** 2
     i = int(np.argmin(dist2))
-    return math.atan2(float(dy[i]), float(dx[i]))
+    return math.atan2(float(dy[i]), float(dx[i])) - math.pi / 2.0
 
 
 def _travel_bearing(state, slow_mps):
@@ -355,11 +421,13 @@ def _travel_bearing(state, slow_mps):
     speed the velocity heading chatters, and a stop is turning the body
     onto the exit heading rather than the path tangent.
     """
-    vx = state.v_lin * math.cos(state.theta) - state.v_lat * math.sin(state.theta)
-    vy = state.v_lin * math.sin(state.theta) + state.v_lat * math.cos(state.theta)
+    c = -math.sin(state.theta)
+    s = math.cos(state.theta)
+    vx = state.v_lin * c - state.v_lat * s
+    vy = state.v_lin * s + state.v_lat * c
     if math.hypot(vx, vy) < slow_mps:
         return None
-    return math.atan2(vy, vx)
+    return math.atan2(vy, vx) - math.pi / 2.0
 
 
 # Episode end. The firmware band is 1 in and 1 deg, or 3 in and 3 deg if
@@ -371,6 +439,9 @@ def _travel_bearing(state, slow_mps):
 FINISH_RADIUS_IN = 12.0
 # True-plant yaw rate, rad/s. Half a radian per second is a slow turn.
 FINISH_YAW_RAD_S = 0.5
+# Pivot window, degrees. Wider than TurnTo's 1 degree settle, for the
+# same reason the drive radius is wider than the firmware band.
+FINISH_HEAD_DEG = 3.0
 # An opening smaller than this is a one-tick bobble, not a departure.
 _FINISH_GROW_IN = 0.05
 
@@ -418,14 +489,15 @@ def _score_goal(guide, sim, goal, practice, ticks):
     # Planned once. A curve that fails to build has nothing to drive, and
     # nothing to compare the travel direction against.
     sample = guide.path if timed_elastic else guide.base_path
-    points = list(sample(START_X_IN, START_Y_IN, 0.0, 0.0, 0.0))
-    sim.localize_reset(START_X_IN, START_Y_IN, 0.0, 0.0, 0.0, 0.0,
+    points = list(sample(START_X_IN, START_Y_IN, -math.pi / 2.0, 0.0, 0.0))
+    sim.localize_reset(START_X_IN, START_Y_IN, -math.pi / 2.0, 0.0, 0.0, 0.0,
                        localization_seed(practice, tx, ty, heading))
     state = sim.state()
     dist_in = math.hypot(state.x_in - tx, state.y_in - ty)
     goal_head = wrap(heading - state.theta)
     speed_err = state.v_lin - exit_speed
     row = {
+        "kind": "drift",
         "practice": practice,
         "tx": tx,
         "ty": ty,
@@ -513,32 +585,136 @@ def _score_goal(guide, sim, goal, practice, ticks):
     return row
 
 
-def score_tracking(guide, sim, values, ticks, goals=None):
-    """Mean cost, plus one row per accel mode and goal."""
+def _score_turn(guide, sim, heading, ticks):
+    """One TurnTo. The clock stops on a loose heading, not the 1 degree window."""
+    guide.begin(heading)
+    sim.localize_reset(START_X_IN, START_Y_IN, -math.pi / 2.0, 0.0, 0.0, 0.0,
+                       localization_seed(False, 0.0, 0.0, heading))
+    state = sim.state()
+    head = wrap(heading - state.theta)
+    slide_in = math.hypot(state.x_in - START_X_IN, state.y_in - START_Y_IN)
+    settle = PoseSettle()
+    row = {
+        "kind": "turn",
+        "practice": False,
+        "tx": START_X_IN,
+        "ty": START_Y_IN,
+        "heading": heading,
+        "exit_speed": 0.0,
+        "done": False,
+        "seconds": ticks * float(plant.DT_SEC),
+        "miss_in": slide_in,
+        "head_deg": abs(math.degrees(head)),
+        "course_deg": 0.0,
+        "speed_err": state.v_lin,
+        "cost": FAIL + abs(math.degrees(head)),
+    }
+    pending = [(0.0, 0.0, 0.0) for _ in range(COMMAND_DELAY_TICKS)]
+    measured = 0
+    done = False
+    for _ in range(ticks):
+        est = sim.estimate()
+        if not all(math.isfinite(v) for v in (
+            state.x_in, state.y_in, state.theta, state.v_lin, state.v_ang,
+            est.x_in, est.y_in, est.theta, est.v_lin, est.v_ang,
+        )):
+            return row
+        surge, sway, yaw = guide.command(
+            est.x_in, est.y_in, est.theta, est.v_lin, est.v_ang)
+        state = delayed_step(sim, pending, surge, sway, yaw)
+        if not all(math.isfinite(v) for v in (
+            state.x_in, state.y_in, state.theta, state.v_lin, state.v_ang
+        )):
+            return row
+        if (state.x_in < _FIELD_X_MIN_IN - _FIELD_ABORT_MARGIN_IN
+                or state.x_in > _FIELD_X_MAX_IN + _FIELD_ABORT_MARGIN_IN
+                or state.y_in < _FIELD_Y_MIN_IN - _FIELD_ABORT_MARGIN_IN
+                or state.y_in > _FIELD_Y_MAX_IN + _FIELD_ABORT_MARGIN_IN):
+            row["miss_in"] = math.hypot(state.x_in - START_X_IN, state.y_in - START_Y_IN)
+            row["head_deg"] = abs(math.degrees(wrap(heading - state.theta)))
+            row["speed_err"] = state.v_lin
+            row["cost"] = FAIL + row["head_deg"]
+            return row
+        measured += 1
+        head = wrap(heading - state.theta)
+        slide_in = math.hypot(state.x_in - START_X_IN, state.y_in - START_Y_IN)
+        if abs(math.degrees(head)) <= FINISH_HEAD_DEG and abs(state.v_ang) <= FINISH_YAW_RAD_S:
+            done = True
+            break
+    if measured == 0:
+        return row
+    pose = ((abs(math.degrees(head)) / FINISH_HEAD_DEG) ** 2
+            + (state.v_ang / FINISH_YAW_RAD_S) ** 2
+            + (slide_in / settle.large_in) ** 2
+            + (state.v_lin / settle.speed) ** 2)
+    if done:
+        tie = 0.5 * (_W_TIME / ticks) * min(pose, 1.0)
+        cost = _W_TIME * (measured / ticks) + tie
+    else:
+        cost = _W_TIME + pose
+    if not math.isfinite(cost):
+        return row
+    row.update({
+        "done": done,
+        "seconds": measured * float(plant.DT_SEC),
+        "miss_in": slide_in,
+        "head_deg": abs(math.degrees(head)),
+        "speed_err": state.v_lin,
+        "cost": cost,
+    })
+    return row
+
+
+def _family_mean(rows):
+    return sum(row["cost"] for row in rows) / len(rows)
+
+
+def score_tracking(guide, segment, turn, sim, values, ticks, goals=None):
+    """Mean of the drift, segment, and turn families, plus every row."""
     goals = GOALS if goals is None else goals
-    rows = []
+    drift_rows = []
+    segment_rows = []
     for practice in (True, False):
         configure(guide, values, practice)
+        configure_segment(segment, values, practice)
         for goal in goals:
-            rows.append(_score_goal(guide, sim, goal, practice, ticks))
-    cost = sum(row["cost"] for row in rows) / len(rows)
+            drift_rows.append(_score_goal(guide, sim, goal, practice, ticks))
+        for goal, block in SEGMENT_CASES:
+            if block is None:
+                segment.clear_block()
+            else:
+                segment.set_block(*block)
+            row = _score_goal(segment, sim, goal, practice, ticks)
+            row["kind"] = "segment"
+            segment_rows.append(row)
+    configure_turn(turn, values)
+    turn_rows = [_score_turn(turn, sim, heading, ticks) for heading in TURN_HEADINGS]
+    rows = drift_rows + segment_rows + turn_rows
+    cost = (_family_mean(drift_rows) + _family_mean(segment_rows) + _family_mean(turn_rows)) / 3.0
     return cost, rows
 
 
-def track_cost(guide, sim, values, ticks, goals=None):
-    """Mean time-to-pose cost, including travel direction. Both accel sources are rolled."""
-    cost, _rows = score_tracking(guide, sim, values, ticks, goals)
+def track_cost(guide, segment, turn, sim, values, ticks, goals=None):
+    """Mean of drift, segment, and turn. Both drive accel sources are rolled."""
+    cost, _rows = score_tracking(guide, segment, turn, sim, values, ticks, goals)
     return cost
 
 
-def print_tracking(guide, sim, values, ticks, goals=None):
-    cost, rows = score_tracking(guide, sim, values, ticks, goals)
+def print_tracking(guide, segment, turn, sim, values, ticks, goals=None):
+    cost, rows = score_tracking(guide, segment, turn, sim, values, ticks, goals)
     print(f"  rollout cost {cost:.6g}")
     for row in rows:
-        mode = "practice" if row["practice"] else "path"
+        if row["kind"] == "turn":
+            mode = "turn"
+            where = f"head {math.degrees(row['heading']):6.1f} deg"
+        else:
+            family = "segment" if row["kind"] == "segment" else "drift"
+            accel = "practice" if row["practice"] else "path"
+            mode = f"{family}/{accel}"
+            where = f"({row['tx']:g}, {row['ty']:g}) in"
         state = "done" if row["done"] else "open"
         print(
-            f"  {mode:8} ({row['tx']:g}, {row['ty']:g}) in  {state} {row['seconds']:.2f}s"
+            f"  {mode:16} {where}  {state} {row['seconds']:.2f}s"
             f"  miss {row['miss_in']:.1f} in  head {row['head_deg']:.1f} deg"
             f"  course {row['course_deg']:.1f} deg"
             f"  speed {row['speed_err']:+.2f} m/s"
@@ -736,13 +912,18 @@ def write_paste(path, values, notes, held_reason):
         "//",
         "// Boomerang::CLOSE_IN is also DrivePolicy::kPositionToleranceIn.",
         "//",
+        "// Part 8 is Turn::MAX_VEL_RAD_S and MAX_ACCEL_RAD_S2. The pivot's",
+        "// volts stay the feedforward in part 2.",
+        "//",
+        "// Part 9 is Segment::STANLEY_K, STANLEY_SOFT, and PIVOT_RAD.",
+        "//",
     ]
     for note in notes:
         lines.append("// " + note)
     lines += [
         "",
         "#ifndef TUNING_PASTE_PART",
-        '#error "Include python/tuning_paste.txt with TUNING_PASTE_PART set to 1..7."',
+        '#error "Include python/tuning_paste.txt with TUNING_PASTE_PART set to 1..9."',
         "#endif",
         "",
         "#if TUNING_PASTE_PART == 1",
@@ -787,8 +968,17 @@ def write_paste(path, values, notes, held_reason):
         f"constexpr Axis Lateral = {{{axis(lateral)}}};",
         f"constexpr Axis Angular = {{{axis(angular)}}};",
         f"constexpr double CLOSE_IN = {cpp_num(values['CLOSE_IN'])};",
+        "#elif TUNING_PASTE_PART == 8",
+        "// Turn  (include/core/Tuning.h)",
+        f"constexpr double MAX_VEL_RAD_S = {cpp_num(values['TURN_MAX_VEL'])};",
+        f"constexpr double MAX_ACCEL_RAD_S2 = {cpp_num(values['TURN_MAX_ACCEL'])};",
+        "#elif TUNING_PASTE_PART == 9",
+        "// Segment  (include/core/Tuning.h)",
+        f"constexpr double STANLEY_K = {cpp_num(values['STANLEY_K'])};",
+        f"constexpr double STANLEY_SOFT = {cpp_num(values['STANLEY_SOFT'])};",
+        f"constexpr double PIVOT_RAD = {cpp_num(values['PIVOT_RAD'])};",
         "#else",
-        '#error "TUNING_PASTE_PART must be 1 through 7."',
+        '#error "TUNING_PASTE_PART must be 1 through 9."',
         "#endif",
         "",
         "#undef TUNING_PASTE_PART",
@@ -816,6 +1006,8 @@ HELD = (
     "DrivePolicy scales: they belong to the trained network, which this search does not run.",
     "Particles, Slip, RangeLik, Ekf, ImuBias, SensorFilter, WallSolve, WallNudge: estimators.",
     "The guide is scored on the true plant pose and commanded from odometry. Estimator gains are not in this search.",
+    "Turn settle window, fallback kV/kA, and the leftover-speed brake. The pivot plan uses the searched caps, and the volts are the shared feedforward.",
+    "Segment pivot_done_rad. Stanley k, the soft speed, and the pivot threshold are searched. Path accel and the heading trim are the shared knobs.",
     "LIN_SPEED_AT_SAT is the plant top speed, MAX_VEL_LIN * SPEED_SCALE. Searching it made the feedforward hold a slower robot than the plant, so full volts could not brake and the chassis ran through the goal.",
     "ANG_KA_MOTOR_COUNT is the motor count from the fit, not a gain.",
     "MockDrive confidence, range period, and reported temperature do not move the chassis.",
@@ -885,6 +1077,8 @@ def main():
     # is being scored.
     sim.set_goal_align(False)
     guide = plant.DriftGuide()
+    segment = plant.SegmentGuide()
+    turn = plant.TurnGuide()
 
     if args.stage in ("all", "plant"):
         if args.log is None:
@@ -940,22 +1134,24 @@ def main():
         )
         if args.timed_elastic:
             print("  timed elastic band deforms the base curve once, at plan time")
-        print("  cost is time until the range opens inside the finish radius")
+        print("  cost is the mean of drift, segment, and turn")
+        print("  a drive ends when the range opens inside the finish radius")
         print("  with yaw rate within 0.5 rad/s, plus travel direction along the path")
+        print("  a pivot ends inside 3 deg with that same yaw rate")
         print("  goal alignment is off")
         values, score = cma_minimize(
             TRACK_KEYS, values,
-            lambda trial: track_cost(guide, sim, trial, ticks, goals),
+            lambda trial: track_cost(guide, segment, turn, sim, trial, ticks, goals),
             generations, args.seed,
             popsize=popsize, restarts=restarts, sigma=sigma,
             tolfun=0.0, tolx=0.0, tolstagnation=0,
             random_mean=random_mean)
         band = " + timed elastic" if args.timed_elastic else ""
         notes.append(
-            f"Stage 2 pose cost {score:.6g} on {args.shape}{band}"
+            f"Stage 2 cost {score:.6g} on {args.shape}{band} drives, segment drives, and turns"
             f" (pop {popsize}, restarts {restarts}, generations {generations})."
         )
-        print_tracking(guide, sim, values, ticks, goals)
+        print_tracking(guide, segment, turn, sim, values, ticks, goals)
         write_paste(args.out, values, notes, HELD)
         print(f"  wrote {args.out}")
 

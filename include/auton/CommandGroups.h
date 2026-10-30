@@ -2,12 +2,10 @@
 /* ---------------------------------------------------------------------------
  * Command groups. Sequential runs one child at a time. Parallel runs every
  * child until all of them finish. ParallelDeadline runs every child and
- * finishes when the deadline finishes, then ends the others.
- *
- * DriveTo::afterTravel() and TurnTo::afterTurn() build one of these deadline
- * groups. The motion is the deadline, and the action starts once the robot
- * has driven the given distance or swept the given angle. The action cannot
- * hold the chassis after the motion ends.
+ * finishes when the deadline finishes and every side command has finished.
+ * Once the deadline has finished, it is not executed again, so a macro can
+ * keep the chassis. A side command's drive is used only when the deadline
+ * has not published one.
  * ------------------------------------------------------------------------- */
 
 #include "auton/Command.h"
@@ -26,7 +24,13 @@ struct CommandSlot {
 
 class SequentialCommandGroup : public Command {
 public:
-    explicit SequentialCommandGroup(std::vector<std::unique_ptr<Command>> commands) {
+    // stop_on_yield drops every command after one that gave the leg up.
+    // A drive's then() uses it, so a claw close does not run when the
+    // drive never arrived. The routine's own sequence leaves it off: the
+    // next leg still runs.
+    explicit SequentialCommandGroup(std::vector<std::unique_ptr<Command>> commands,
+                                    bool stop_on_yield = false)
+        : stop_on_yield_(stop_on_yield) {
         slots_.reserve(commands.size());
         for (auto& command : commands) {
             if (command) slots_.push_back(CommandSlot{std::move(command), false, false});
@@ -41,12 +45,19 @@ public:
                 slot.started = true;
             }
             if (!slot.command->execute(tick)) return false;
+            const bool yielded = tick.yielded;
             slot.command->end(false);
             slot.finished = true;
             // The finished child no longer owns the chassis. The next child
             // writes a new command on this same tick, or the drive stops.
             tick.drive_active = false;
+            tick.yielded = false;
+            tick.motion_arrived = false;
             ++index_;
+            if (stop_on_yield_ && yielded) {
+                index_ = slots_.size();
+                return true;
+            }
         }
         return true;
     }
@@ -77,6 +88,7 @@ public:
 private:
     std::vector<CommandSlot> slots_;
     std::size_t index_ = 0;
+    bool stop_on_yield_ = false;
 };
 
 class ParallelCommandGroup : public Command {
@@ -102,7 +114,7 @@ public:
         ChassisCommand drive{};
         for (auto& slot : slots_) {
             if (slot.finished) continue;
-            CommandTick side{tick.state};
+            CommandTick side = tick.branch();
             const bool done = slot.command->execute(side);
             // Two motion commands in one parallel group fight. The later one
             // keeps the chassis for this tick.
@@ -172,19 +184,41 @@ public:
     }
 
     bool execute(CommandTick& tick) override {
-        const bool deadline_done = deadline_ ? deadline_->execute(tick) : true;
+        if (!deadline_finished_) {
+            deadline_finished_ = deadline_ ? deadline_->execute(tick) : true;
+            // Arrived, rather than gave up. Gates that have not armed yet
+            // fire on the side tick below. A yielded drive never sets this.
+            if (deadline_finished_ && !tick.yielded) arrived_ = true;
+        }
+        // The drive gave up. A side command waiting on more travel would
+        // never finish, so the leg ends and the routine can continue.
+        if (deadline_finished_ && tick.yielded) {
+            for (auto& slot : others_) {
+                if (slot.finished) continue;
+                if (slot.started && slot.command) slot.command->end(true);
+                slot.finished = true;
+            }
+            return true;
+        }
+        bool sides_running = false;
         for (auto& slot : others_) {
             if (slot.finished) continue;
             // A side command must not replace the deadline's chassis command.
-            CommandTick side{tick.state};
+            CommandTick side = tick.branch();
+            side.motion_arrived = arrived_;
             const bool done = slot.command->execute(side);
             if (!tick.drive_active && side.drive_active) tick.setDrive(side.drive);
             if (done) {
                 slot.command->end(false);
                 slot.finished = true;
+            } else {
+                sides_running = true;
             }
         }
-        return deadline_done;
+        // The move has arrived. A macro still running publishes its own drive
+        // through the pipeline, and this leg stops adding the old one.
+        if (deadline_finished_ && sides_running) tick.drive_active = false;
+        return deadline_finished_ && !sides_running;
     }
 
     void end(bool interrupted) override {
@@ -216,6 +250,8 @@ private:
     std::vector<CommandSlot> others_;
     bool deadline_started_ = false;
     bool deadline_ended_ = false;
+    bool deadline_finished_ = false;
+    bool arrived_ = false;
 };
 
 // Waits until the robot has traveled distance_in from where this command
@@ -239,7 +275,9 @@ public:
         traveled_ += std::hypot(pose.x - prev_.x, pose.y - prev_.y);
         prev_ = pose;
         if (!armed_) {
-            if (traveled_ + 1e-9 < distance_in_) return false;
+            // The move already arrived. More odometry will not show up,
+            // because that drive has stopped publishing.
+            if (traveled_ + 1e-9 < distance_in_ && !tick.motion_arrived) return false;
             if (action_) action_->initialize(tick);
             armed_ = true;
         }
@@ -290,7 +328,8 @@ public:
         turned_ += std::fabs(mathutil::normalize_angle(now - prev_));
         prev_ = now;
         if (!armed_) {
-            if (turned_ + 1e-9 < angle_rad_) return false;
+            // The pivot already finished. The heading will not keep sweeping.
+            if (turned_ + 1e-9 < angle_rad_ && !tick.motion_arrived) return false;
             if (action_) action_->initialize(tick);
             armed_ = true;
         }

@@ -1,16 +1,19 @@
 #include "logic/UserInputOverride.h"
 #include "control/DriftFollower.h"
 #include "control/DrivePolicy.h"
+#include "control/SegmentFollower.h"
 #include "config/Settings.h"
 #include "logic/DriftCurveOverride.h"
+#include "field/FieldPoints.h"
 #include "logic/GoalAligner.h"
 #include "math/TargetPlane.h"
+#include "math/MathUtils.h"
 #include "core/Tuning.h"
 #include <cmath>
 
 namespace {
 
-DriftFollower g_nav;
+SegmentFollower g_nav;
 bool g_prev_a = false;
 
 // Crossing watch. The plane normal is frozen on the approach: rebuilding
@@ -54,19 +57,21 @@ double planeNormal(const DriftCurveTarget& target, const Pose2d& from) {
     const double dx = target.x - from.x;
     const double dy = target.y - from.y;
     if (std::hypot(dx, dy) <= 1e-4) return target.exit_direction;
-    return std::atan2(dy, dx);
+    return mathutil::direction_heading(dx, dy);
 }
 
 void armPracticeDrive() {
     const MotionPose goal{Practice::GOAL_X, Practice::GOAL_Y,
                           Practice::GOAL_HEADING_RAD, Practice::EXIT_SPEED_MPS, 0.0};
     PathConstraints limits;
+    limits.point = CommandPoint::Tracking;
     limits.max_accel_mps2 = Practice::MAX_ACCEL_MPS2;
     limits.line_length_in = Practice::LINE_LENGTH * 12.0;
 
     g_nav.reset();
     DrivePolicy::reset();
     g_nav.config.forwards = goal.v >= 0.0;
+    g_nav.config.obstacle_n = Field::goalAvoidObstacles(g_nav.config.obstacles, kPathObstacles);
     g_nav.target = DriftCurveTarget::fromMotion(goal, limits);
     clearPlaneWatch();
     g_drift_curve_on = true;
@@ -98,7 +103,7 @@ void abortIfPastExitPlane(const StateEstimate& estimate) {
 bool g_drift_curve_on = false;
 bool g_drift_curve_abort = false;
 
-DriftFollower& driftCurve() { return g_nav; }
+SegmentFollower& driftCurve() { return g_nav; }
 
 void driftCurveOverridePoll(const ButtonState& buttons,
                             const JoystickData& raw_sticks,
@@ -142,7 +147,8 @@ OverrideResult userInputOverride(const ChassisObservation& /*sensor*/,
                                  const Pose2d& body,
                                  const JoystickData& raw_sticks,
                                  RobotMode mode,
-                                 const IFeedForward* model) {
+                                 const IFeedForward* model,
+                                 const CommandVector* motion) {
     OverrideResult out;
     out.commands = commands;
     out.buttons  = buttons;
@@ -150,10 +156,14 @@ OverrideResult userInputOverride(const ChassisObservation& /*sensor*/,
     driftCurveOverridePoll(buttons, raw_sticks, mode);
     abortIfPastExitPlane(estimate);
 
-    if (g_drift_curve_abort) {
-        driftCurveOverrideStop();
+    if (g_drift_curve_abort) driftCurveOverrideStop();
+
+    if (motion != nullptr) {
+        // A routine's control vector replaces the sticks. The drive base
+        // is what turns it into voltage.
+        out.commands = *motion;
     } else if (g_drift_curve_on) {
-        // The curve owns the voltage. The plant snap still seats the chassis
+        // The curve owns the command. The plant snap still seats the chassis
         // when the front edge reaches a goal.
         out.commands = driftCurveOverride(estimate, model);
         noteApproachPose(estimate.pose);

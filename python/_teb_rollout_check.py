@@ -12,7 +12,7 @@ def rollout(goal, timed, practice, ticks=500):
     sim = plant.PlantSim()
     configure(guide, nominal(), practice)
     guide.begin(tx, ty, heading, exit_speed, False, False, "Hermite", timed)
-    sim.localize_reset(START_X_IN, START_Y_IN, 0.0, 0.0, 0.0, 0.0, 1)
+    sim.localize_reset(START_X_IN, START_Y_IN, -math.pi / 2.0, 0.0, 0.0, 0.0, 1)
     pending = [(0.0, 0.0, 0.0) for _ in range(COMMAND_DELAY_TICKS)]
     yaws, speeds, thetas = [], [], []
     state = sim.state()
@@ -66,8 +66,8 @@ def trace(timed, ticks=40):
     guide = plant.DriftGuide()
     sim = plant.PlantSim()
     configure(guide, nominal(), True)
-    guide.begin(tx, ty, 0.0, 0.0, False, False, "Hermite", timed)
-    sim.localize_reset(START_X_IN, START_Y_IN, 0.0, 0.0, 0.0, 0.0, 1)
+    guide.begin(tx, ty, -math.pi / 2.0, 0.0, False, False, "Hermite", timed)
+    sim.localize_reset(START_X_IN, START_Y_IN, -math.pi / 2.0, 0.0, 0.0, 0.0, 1)
     pending = [(0.0, 0.0, 0.0) for _ in range(COMMAND_DELAY_TICKS)]
     label = "teb" if timed else "base"
     print(f"--- {label} trace ---")
@@ -77,7 +77,7 @@ def trace(timed, ticks=40):
         pts = list(guide.path(est.x_in, est.y_in, est.theta, est.v_lin, est.v_ang))
         chord = 0.0
         if len(pts) >= 2:
-            chord = math.degrees(math.atan2(pts[1][1] - pts[0][1], pts[1][0] - pts[0][0]))
+            chord = math.degrees(math.atan2(pts[1][1] - pts[0][1], pts[1][0] - pts[0][0]) - math.pi / 2.0)
         state = delayed_step(sim, pending, surge, sway, yaw)
         if i % 5 == 0:
             print(
@@ -90,12 +90,12 @@ trace(True)
 trace(False)
 print("--- goals ---")
 goals = [
-    (48.0, 72.0, 0.0, 0.0),
-    (36.0, 96.0, 1.2, 0.0),
-    (24.0, 54.0, -0.6, 0.0),
-    (30.0, 82.0, 0.4, 0.4),
-    (-36.0, 72.0, math.pi, 0.0),
-    (20.0, 100.0, math.pi, 0.0),
+    (48.0, 72.0, -math.pi / 2.0, 0.0),
+    (36.0, 96.0, 1.2 - math.pi / 2.0, 0.0),
+    (24.0, 54.0, -0.6 - math.pi / 2.0, 0.0),
+    (30.0, 82.0, 0.4 - math.pi / 2.0, 0.4),
+    (-36.0, 72.0, math.pi / 2.0, 0.0),
+    (20.0, 100.0, math.pi / 2.0, 0.0),
 ]
 for goal in goals:
     for practice in (True, False):

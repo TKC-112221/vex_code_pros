@@ -5,11 +5,16 @@
  *
  * Each side is a first-order lag toward (voltage / max_volts) * MAX_VEL_LIN,
  * so a held voltage settles at a finite speed and zero voltage coasts to a
- * stop. service() is the desktop stand-in for the 10 ms of real time that
+ * stop. The field window can split that lag: linear and angular friction eat
+ * voltage before the axis moves, and each axis has its own settled speed and
+ * rise time. With those knobs on the compiled tick the sides stay one lag.
+ * service() is the desktop stand-in for the 10 ms of real time that
  * elapses between pipeline ticks: it integrates the plant and redraws the
  * estimator pose. The keyboard is the V5 controller.
  * ------------------------------------------------------------------------- */
 #include "hardware/MockDrive.h"
+#include "hardware/ChassisVoltage.h"
+#include "math/TrackingCenter.h"
 #include "config/Settings.h"
 #include "core/Specs.h"
 #include "core/Tuning.h"
@@ -17,8 +22,10 @@
 #include "math/MathUtils.h"
 #include "math/WallRange.h"
 #include "host/FieldWindow.h"
+#include "logic/CascadeLift.h"
 #if !defined(PLANT_MODULE)
-#include "logic/ScoreMacro.h"
+#include "logic/GoalScore.h"
+#include "logic/MatchLoader.h"
 #endif
 #include <algorithm>
 #include <cmath>
@@ -36,6 +43,7 @@ MockDrive::MockDrive(const IFeedForward& feedforward, double max_volts, bool sca
 
 void MockDrive::initialize() {
     ensureSensorScales();
+    cascadeLift().zero(readCascade());
 }
 
 void MockDrive::ensureSensorScales() {
@@ -96,6 +104,9 @@ void MockDrive::calibrateSensors() {
 void MockDrive::stop() {
     plant_left_v_ = 0.0;
     plant_right_v_ = 0.0;
+    volt_surge_ = 0.0;
+    volt_yaw_ = 0.0;
+    volt_primed_ = false;
 }
 
 void MockDrive::setJoystick(const JoystickData& joy) { joystick_ = joy; }
@@ -134,9 +145,14 @@ void MockDrive::setPlant(double x_in, double y_in, double theta,
     right_mps_ = clamp_val(v_lin + v_ang * half, -Robot::MAX_VEL_LIN, Robot::MAX_VEL_LIN);
     plant_left_v_ = plant_right_v_ = 0.0;
     left_amps_ = right_amps_ = 0.0;
+    volt_surge_ = volt_yaw_ = 0.0;
+    volt_primed_ = false;
     prev_v_fwd_ = (left_mps_ + right_mps_) * 0.5;
     prev_v_lat_ = lat_mps_;
     settleContacts(0.0);
+    // Clockwise rotation. With the offset at zero, the next heading read
+    // equals the placed heading, including a nudge settleContacts applied.
+    imu_rotation_deg_ = -(heading_rad_ + imu_offset_) * (180.0 / M_PI);
 }
 
 JoystickData MockDrive::readJoystick() {
@@ -178,6 +194,8 @@ void MockDrive::resetSensors() {
     left_mps_ = right_mps_ = 0.0;
     plant_left_v_ = plant_right_v_ = 0.0;
     left_amps_ = right_amps_ = 0.0;
+    volt_surge_ = volt_yaw_ = 0.0;
+    volt_primed_ = false;
     prev_l_ = prev_r_ = 0.0;
     heading_rad_ = 0.0;
     imu_offset_ = 0.0;
@@ -211,19 +229,32 @@ ChassisObservation MockDrive::readObservation(double prev_heading_rad) {
     const double meters_per_tick = Robot::METERS_PER_TURN / Robot::Encoder::TICKS_PER_REV;
     const double qL = std::round(left_m_ / meters_per_tick) * meters_per_tick;
     const double qR = std::round(right_m_ / meters_per_tick) * meters_per_tick;
+    const double held_l = prev_l_;
+    const double held_r = prev_r_;
     double delta_l = qL - prev_l_;
     double delta_r = qR - prev_r_;
+    // The baseline keeps moving while a bank is unplugged, so plugging it
+    // back does not dump the travel that happened in between.
     prev_l_ = qL;
     prev_r_ = qR;
+
+    const fieldwindow::PlantOverride sens = fieldwindow::plantOverride();
+    const double vel_sigma = Robot::Encoder::VEL_SIGMA_RPM * Robot::RPM_TO_MPS;
+    double l_mps = left_mps_ + normal_() * vel_sigma;
+    double r_mps = right_mps_ + normal_() * vel_sigma;
+    if (sens.enc_left_off) {
+        delta_l = 0.0;
+        l_mps = 0.0;
+    }
+    if (sens.enc_right_off) {
+        delta_r = 0.0;
+        r_mps = 0.0;
+    }
+    double l_vel = l_mps / Robot::RPM_TO_MPS;
+    double r_vel = r_mps / Robot::RPM_TO_MPS;
     o.forward_delta = (delta_l + delta_r) / 2.0;
     // Encoders do not measure the omni skid, so the localizer sees no strafe.
     o.strafe_delta = 0.0;
-
-    const double vel_sigma = Robot::Encoder::VEL_SIGMA_RPM * Robot::RPM_TO_MPS;
-    const double l_mps = left_mps_ + normal_() * vel_sigma;
-    const double r_mps = right_mps_ + normal_() * vel_sigma;
-    double l_vel = l_mps / Robot::RPM_TO_MPS;
-    double r_vel = r_mps / Robot::RPM_TO_MPS;
     o.v_lin = (l_mps + r_mps) / 2.0;
 
     if (CT::IMU_FALLBACK) {
@@ -270,8 +301,25 @@ ChassisObservation MockDrive::readObservation(double prev_heading_rad) {
         o.imu_accel_y = accelG(ay);
     }
 
-    o.left_pos_deg  = (qL / Robot::METERS_PER_TURN) * 360.0;
-    o.right_pos_deg = (qR / Robot::METERS_PER_TURN) * 360.0;
+    // An unplugged IMU keeps the last heading and reports no rate. The
+    // gyro integration above still runs, so connecting it again publishes
+    // the rotation the sensor would have now.
+    if (sens.imu_off) {
+        if (!imu_held_) {
+            imu_held_ = true;
+            imu_held_heading_ = o.heading_rad;
+        }
+        o.heading_rad = imu_held_heading_;
+        o.v_ang = 0.0;
+        o.imu_rate_z_dps = 0.0;
+        o.imu_accel_x = 0.0;
+        o.imu_accel_y = 0.0;
+    } else {
+        imu_held_ = false;
+    }
+
+    o.left_pos_deg  = ((sens.enc_left_off ? held_l : qL) / Robot::METERS_PER_TURN) * 360.0;
+    o.right_pos_deg = ((sens.enc_right_off ? held_r : qR) / Robot::METERS_PER_TURN) * 360.0;
     o.left_vel_rpm = l_vel;
     o.right_vel_rpm = r_vel;
     o.left_current_amps  = left_amps_;
@@ -287,8 +335,12 @@ void MockDrive::readDistances(DistanceReading (&out)[kDistanceChannels]) {
     // the last millimeter, which is what a 10 ms poll of the real sensor sees.
     const bool fresh = (dist_tick_ == 0);
     if (++dist_tick_ >= MockPlant::RANGE_PERIOD_TICKS) dist_tick_ = 0;
+    const fieldwindow::PlantOverride sens = fieldwindow::plantOverride();
 
-    const Pose2d pose{true_x_, true_y_, heading_rad_ + imu_offset_};
+    // The plant stores the geometric center. Beams are offset from the
+    // tracking centre, so the ray starts at the front middle.
+    const Pose2d pose = tracking::trackingFromCenter(
+        Pose2d{true_x_, true_y_, heading_rad_ + imu_offset_});
     const int min_mm = static_cast<int>(Robot::Range::MIN_M * 1000.0 + 0.5);
     const int max_mm = static_cast<int>(Robot::Range::MAX_M * 1000.0 + 0.5);
     for (int i = 0; i < kDistanceChannels; ++i) {
@@ -306,6 +358,10 @@ void MockDrive::readDistances(DistanceReading (&out)[kDistanceChannels]) {
                     dist_conf_[i] = distanceConfidence(mm);
                 }
             }
+        }
+        if (sens.distance_off[i]) {
+            out[i] = {};
+            continue;
         }
         out[i].valid = dist_valid_[i];
         out[i].range_m = dist_valid_[i] ? (static_cast<double>(dist_mm_[i]) / 1000.0) : 0.0;
@@ -328,9 +384,18 @@ void MockDrive::applyCurrentLimit(double& left_v, double& right_v, double v_lin,
 ChassisCommand MockDrive::applyDrive(const ChassisCommand& cmd, const ChassisObservation& obs) {
     namespace CT = Settings::ControlToggles;
 
-    // Inverse kinematics: chassis effort -> per-bank voltage.
-    double left_v  = cmd.linear - cmd.angular;
-    double right_v = cmd.linear + cmd.angular;
+    ChassisVoltageState held;
+    held.v = volt_surge_;
+    held.w = volt_yaw_;
+    held.primed = volt_primed_;
+    const ChassisCommand volts = chassisVoltage(cmd, obs, feedforward_, held);
+    volt_surge_ = held.v;
+    volt_yaw_ = held.w;
+    volt_primed_ = held.primed;
+
+    // Inverse kinematics: chassis volts -> per-bank voltage.
+    double left_v  = volts.linear - volts.angular;
+    double right_v = volts.linear + volts.angular;
 
     // Stick-zero brake: gently oppose residual motion when the sticks are idle.
     if (CT::STICK_ZERO_BRAKE) {
@@ -373,6 +438,7 @@ ChassisCommand MockDrive::applyDrive(const ChassisCommand& cmd, const ChassisObs
 
 void MockDrive::applySubsystems(const SubsystemCommand& sub) {
     subsystems_ = sub;
+    cascadeLift().writePercent(subsystems_, readCascade());
 }
 
 CascadeReading MockDrive::readCascade() const {
@@ -420,6 +486,59 @@ void MockDrive::setDynamics(double velocity_tau_sec, double skid_tau_sec,
     if (speed_scale > 1e-3) speed_scale_ = speed_scale;
 }
 
+void MockDrive::setAxisResponse(double lin_friction_v, double lin_vel_scale, double lin_accel_scale,
+                                double ang_friction_v, double ang_vel_scale, double ang_accel_scale) {
+    auto friction = [](double volts) {
+        if (volts < 0.0) return 0.0;
+        if (volts > 24.0) return 24.0;
+        return volts;
+    };
+    auto scale = [](double value) {
+        if (value < 0.05) return 0.05;
+        if (value > 8.0) return 8.0;
+        return value;
+    };
+    lin_friction_v_ = friction(lin_friction_v);
+    ang_friction_v_ = friction(ang_friction_v);
+    lin_vel_scale_ = scale(lin_vel_scale);
+    ang_vel_scale_ = scale(ang_vel_scale);
+    lin_accel_scale_ = scale(lin_accel_scale);
+    ang_accel_scale_ = scale(ang_accel_scale);
+}
+
+bool MockDrive::axisResponseIsIdentity() const {
+    return lin_friction_v_ <= 1e-9 && ang_friction_v_ <= 1e-9
+        && std::fabs(lin_vel_scale_ - 1.0) <= 1e-9
+        && std::fabs(ang_vel_scale_ - 1.0) <= 1e-9
+        && std::fabs(lin_accel_scale_ - 1.0) <= 1e-9
+        && std::fabs(ang_accel_scale_ - 1.0) <= 1e-9;
+}
+
+double MockDrive::responseSpeedLimit() const {
+    const double vmax = Robot::MAX_VEL_LIN * speed_scale_;
+    const double axis = (lin_vel_scale_ > ang_vel_scale_) ? lin_vel_scale_ : ang_vel_scale_;
+    return vmax * axis;
+}
+
+void MockDrive::setVoltageDelayTicks(int ticks) {
+    if (ticks < 0) ticks = 0;
+    if (ticks >= kVoltageDelayCap) ticks = kVoltageDelayCap - 1;
+    voltage_delay_ticks_ = ticks;
+}
+
+void MockDrive::delayCommand(double& left_v, double& right_v) {
+    delay_left_[delay_head_] = left_v;
+    delay_right_[delay_head_] = right_v;
+    if (voltage_delay_ticks_ > 0) {
+        int back = delay_head_ - voltage_delay_ticks_;
+        if (back < 0) back += kVoltageDelayCap;
+        left_v = delay_left_[back];
+        right_v = delay_right_[back];
+    }
+    delay_head_ += 1;
+    if (delay_head_ >= kVoltageDelayCap) delay_head_ = 0;
+}
+
 void MockDrive::settleContacts(double dt_seconds) {
     // Wheel voltage has already become left/right speed. A wall then stops
     // the corner that crossed it. The goal snap runs after that, in every
@@ -436,8 +555,9 @@ void MockDrive::settleContacts(double dt_seconds) {
     body.v_lat = lat_mps_;
     body.omega = omega0;
 
+    const double wheel_cap = responseSpeedLimit();
     const ContactStep stepped = stepContacts(
-        body, dt_seconds, skid_tau_, Robot::MAX_VEL_LIN * speed_scale_);
+        body, dt_seconds, skid_tau_, wheel_cap);
 
     true_x_ = body.x_m;
     true_y_ = body.y_m;
@@ -453,10 +573,9 @@ void MockDrive::settleContacts(double dt_seconds) {
         right_m_ -= dropped - extra_yaw * half_track;
     }
 
-    const double vmax = Robot::MAX_VEL_LIN * speed_scale_;
-    lat_mps_ = clamp_val(body.v_lat, -vmax, vmax);
-    left_mps_ = clamp_val(body.v_fwd - body.omega * half_track, -vmax, vmax);
-    right_mps_ = clamp_val(body.v_fwd + body.omega * half_track, -vmax, vmax);
+    lat_mps_ = clamp_val(body.v_lat, -wheel_cap, wheel_cap);
+    left_mps_ = clamp_val(body.v_fwd - body.omega * half_track, -wheel_cap, wheel_cap);
+    right_mps_ = clamp_val(body.v_fwd + body.omega * half_track, -wheel_cap, wheel_cap);
 }
 
 void MockDrive::stepSimulation(double dt_seconds) {
@@ -469,8 +588,57 @@ void MockDrive::stepSimulation(double dt_seconds) {
         double target = (volts / full_scale) * vmax;
         return clamp_val(mps + (target - mps) * blend, -vmax, vmax);
     };
-    left_mps_  = approach(left_mps_,  plant_left_v_);
-    right_mps_ = approach(right_mps_, plant_right_v_);
+    // The lag integrates the voltage from voltage_delay_ticks_ ago. Zero
+    // delay keeps this tick's command, which is the compiled plant.
+    double left_v = plant_left_v_;
+    double right_v = plant_right_v_;
+    delayCommand(left_v, right_v);
+    if (axisResponseIsIdentity()) {
+        left_mps_  = approach(left_mps_,  left_v);
+        right_mps_ = approach(right_mps_, right_v);
+    } else {
+        // Forward voltage is the average. Yaw voltage is V_R - V_L, so a
+        // full opposite pair is two full-scale rails and the yaw cap is
+        // twice the wheel cap divided by the track.
+        const double track = Robot::Chassis::TRACK_WIDTH_M;
+        const double half = track * 0.5;
+        auto tauFor = [&](double accel_scale) {
+            double tau = velocity_tau_ / accel_scale;
+            if (tau < 1e-3) tau = 1e-3;
+            return tau;
+        };
+        auto chase = [&](double speed, double volts, double cap, double volt_span,
+                         double tau, double friction) {
+            double used = volts;
+            if (friction > 0.0) {
+                if (std::fabs(speed) <= 1e-3) {
+                    if (std::fabs(volts) <= friction) used = 0.0;
+                    else used = volts - friction * sign(volts);
+                } else {
+                    used = volts - friction * sign(speed);
+                }
+            }
+            const double target = (volt_span > 1e-6) ? (used / volt_span) * cap : 0.0;
+            const double rise = 1.0 - std::exp(-dt_seconds / tau);
+            double next = speed + (target - speed) * rise;
+            // Friction may stop the axis. It may not reverse it. A command
+            // larger than friction and aimed the other way is allowed through.
+            const bool driven_through = (volts * speed < 0.0) && (std::fabs(volts) > friction);
+            if (speed * next < 0.0 && !driven_through) next = 0.0;
+            if (std::fabs(speed) <= 1e-3 && std::fabs(volts) <= friction) next = 0.0;
+            return clamp_val(next, -cap, cap);
+        };
+        const double v_cap = vmax * lin_vel_scale_;
+        const double w_cap = (half > 1e-6) ? (vmax / half) * ang_vel_scale_ : 0.0;
+        double v = (left_mps_ + right_mps_) * 0.5;
+        double w = (track > 1e-6) ? (right_mps_ - left_mps_) / track : 0.0;
+        v = chase(v, (left_v + right_v) * 0.5, v_cap, full_scale,
+                  tauFor(lin_accel_scale_), lin_friction_v_);
+        w = chase(w, right_v - left_v, w_cap, 2.0 * full_scale,
+                  tauFor(ang_accel_scale_), ang_friction_v_);
+        left_mps_ = v - w * half;
+        right_mps_ = v + w * half;
+    }
 
     left_m_  += left_mps_  * dt_seconds;
     right_m_ += right_mps_ * dt_seconds;
@@ -480,12 +648,13 @@ void MockDrive::stepSimulation(double dt_seconds) {
     // forward still throws the robot to its right.
     settleContacts(dt_seconds);
 
+    const double v_sat = responseSpeedLimit();
     auto amps = [&](double volts, double mps) {
-        double emf = (vmax > 1e-6) ? (mps / vmax) * full_scale : 0.0;
+        double emf = (v_sat > 1e-6) ? (mps / v_sat) * full_scale : 0.0;
         return (volts - emf) / side_resistance_;
     };
-    left_amps_  = amps(plant_left_v_,  left_mps_);
-    right_amps_ = amps(plant_right_v_, right_mps_);
+    left_amps_  = amps(left_v,  left_mps_);
+    right_amps_ = amps(right_v, right_mps_);
     stepCascade(dt_seconds);
 }
 
@@ -507,15 +676,25 @@ void MockDrive::pollKeyboard() {
 
 void MockDrive::service(double dt, const Pose2d& display_pose,
                         const Pose2d* particles, int particle_count) {
+    // Host domain randomization. Training calls stepSimulation directly and
+    // keeps whatever setDynamics stored, so a search is not pulled back here.
+    const fieldwindow::PlantOverride over = fieldwindow::plantOverride();
+    setDynamics(over.velocity_tau_sec, over.skid_tau_sec, side_resistance_, over.speed_scale);
+    setVoltageDelayTicks(over.voltage_delay_ticks);
+    setAxisResponse(over.lin_friction_v, over.lin_vel_scale, over.lin_accel_scale,
+                    over.ang_friction_v, over.ang_vel_scale, over.ang_accel_scale);
+
     // Truth at sensor time, before this tick's integration, so it lines up
     // with the estimate the pipeline just published.
-    const Pose2d truth = poseMetersToInches(
-        Pose2d{true_x_, true_y_, heading_rad_ + imu_offset_});
+    // The plant stores the geometric center. The field view and the
+    // estimate both use the front middle.
+    const Pose2d truth = poseMetersToInches(tracking::trackingFromCenter(
+        Pose2d{true_x_, true_y_, heading_rad_ + imu_offset_}));
     stepSimulation(dt);
     const CascadeReading cascade = readCascade();
     const char* phase = "Idle";
 #if !defined(PLANT_MODULE)
-    phase = liveScoreMacro().phaseName();
+    phase = matchLoaderRunning() ? "Loader" : goalScorePhaseName();
 #endif
     fieldwindow::setMechanisms(subsystems_, cascade.position_deg / kCascadeTravelDeg,
                                cascade, phase);

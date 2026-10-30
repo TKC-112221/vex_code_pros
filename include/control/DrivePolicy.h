@@ -3,9 +3,9 @@
  * DrivePolicy  --  a small actor that follows a path's thrust and heading.
  *
  * Output is CommandVector. This chassis is differential: the actor
- * commands surge and yaw only, and sway is left at zero. applyDrive
- * ignores a lateral voltage. command() applies tanh and scales the two
- * outputs to ±System::MAX_VOLTS.
+ * commands surge and yaw only, and sway is left at zero. command()
+ * applies tanh, then scales that fraction onto the chassis free speed.
+ * The drive base turns the velocity into volts with its VAS model.
  *
  * The actor is features -> 64 -> 64 -> 2, SiLU hidden, linear output.
  * init() copies include/control/DrivePolicyWeights.h. Re-export after

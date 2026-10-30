@@ -1,7 +1,7 @@
 """Write a trained SAC actor into the firmware weight table.
 
 The deployed network is the actor mean: Linear-SiLU-Linear-SiLU-Linear.
-The firmware applies tanh and scales to ±12 V, which is the deterministic
+The firmware applies tanh and scales onto free speed, which is the deterministic
 SAC action. log_std stays in the checkpoint and is not exported.
 
     python python/export_policy.py python/drive_policy.zip
@@ -114,7 +114,8 @@ def check_against_plant(weights, sizes):
             y = weight @ y + bias
             if index < len(sizes) - 2:
                 y = torch.nn.functional.silu(y)
-        y = torch.tanh(y) * plant.MAX_VOLTS
+        y = torch.tanh(y)
+        y = y * torch.tensor([float(plant.MAX_VEL_LIN), float(plant.MAX_VEL_ANG)])
     got = np.array([surge, yaw], dtype=np.float64)
     expect = y.numpy().astype(np.float64)
     if abs(float(sway)) > 1e-6:

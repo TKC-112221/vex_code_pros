@@ -3,6 +3,7 @@
 #include "core/Specs.h"
 #include "core/Tuning.h"
 #include "math/MathUtils.h"
+#include "math/TrackingCenter.h"
 #include "math/WallRange.h"
 #include <cmath>
 
@@ -132,7 +133,7 @@ void SlipEnsemble::sampleCharacteristics() {
 }
 
 void SlipEnsemble::reset() {
-    reset(Pose2d{Robot::Range::CENTER_X_M, Robot::Range::CENTER_Y_M, 0.0});
+    reset(tracking::origin());
 }
 
 void SlipEnsemble::reset(const Pose2d& pose) {
@@ -154,8 +155,13 @@ void SlipEnsemble::setUniformWeights() {
 }
 
 void SlipEnsemble::clampParticle(Particle& p) const {
-    Robot::clampFieldMeters(p.x, p.y, 0.18);
-    p.theta = mathutil::normalize_angle(p.theta);
+    Pose2d center = tracking::centerFromTracking(Pose2d{p.x, p.y, p.theta});
+    Robot::clampFieldMeters(center.x, center.y, 0.18);
+    center.theta = mathutil::normalize_angle(center.theta);
+    const Pose2d tracked = tracking::trackingFromCenter(center);
+    p.x = tracked.x;
+    p.y = tracked.y;
+    p.theta = tracked.theta;
 }
 
 double SlipEnsemble::uniform() {
@@ -200,12 +206,10 @@ void SlipEnsemble::predict(double forward_m, double strafe_m, double d_theta_rad
         const double ns = str + p.skid_per_m * fwd + p.skid_per_rad * yaw
                         + ((sig_s > 0.0) ? normal() * sig_s * ns_scale : 0.0);
         const double nd = yaw + ((sig_r > 0.0) ? normal() * sig_r * ns_scale : 0.0);
-        const double mid = p.theta + nd * 0.5;
-        const double c = std::cos(mid);
-        const double s = std::sin(mid);
-        p.x += nf * c - ns * s;
-        p.y += nf * s + ns * c;
-        p.theta = p.theta + nd;
+        const double th0 = p.theta;
+        const double mid = th0 + nd * 0.5;
+        tracking::integrate(p.x, p.y, th0, th0 + nd, nf, ns, mid);
+        p.theta = th0 + nd;
         clampParticle(p);
     }
     recomputeEstimate();
@@ -279,12 +283,14 @@ void SlipEnsemble::nudge(const DistanceReading* distance, int count, double head
 
     for (int pi = 0; pi < cfg_.count; ++pi) {
         Particle& p = particles_[pi];
+        // The particle is the tracking centre, and the beams are offset from it.
+        const Pose2d here{p.x, p.y, p.theta};
         WallHit hits[Robot::Range::COUNT]{};
         double log_lik = 0.0;
         for (int i = 0; i < count; ++i) {
             if (!beams[i].use) continue;
             if (have_trust && !trust[i]) continue;
-            hits[i] = wallrange::predictWallRange(Pose2d{p.x, p.y, p.theta}, i);
+            hits[i] = wallrange::predictWallRange(here, i);
             double term = kMaxPenalty;
             if (hits[i].hit) {
                 const double err = beams[i].z - hits[i].range_m;

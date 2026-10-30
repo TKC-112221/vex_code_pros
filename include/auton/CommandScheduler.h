@@ -41,6 +41,7 @@ public:
         const Lock lock(mutex_);
         SchedulerOutput out;
         CommandTick tick{state};
+        tick.pause_motion = pause_motion_;
         while (!queue_.empty()) {
             Command& command = *queue_.front();
             if (!front_started_) {
@@ -60,10 +61,14 @@ public:
             queue_.pop();
             front_started_ = false;
             tick.drive_active = false;
+            tick.yielded = false;
             out.has_drive = false;
         }
         return out;
     }
+
+    // Set from the previous macro tick. Motion commands hold while this is set.
+    void pauseMotion(bool pause) { pause_motion_ = pause; }
 
     void cancel() {
         const Lock lock(mutex_);
@@ -93,6 +98,7 @@ private:
     mutable pros::Mutex mutex_;
     std::queue<std::unique_ptr<Command>> queue_;
     bool front_started_ = false;
+    bool pause_motion_ = false;
 };
 
 } // namespace auton

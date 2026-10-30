@@ -5,9 +5,10 @@
  * The field is an axis-aligned 12 ft square. Its origin is the center of
  * the bottom edge (Robot::Range): +x toward the right wall, +y toward the
  * far wall.
- * Each beam is Robot::Range::MOUNT in the chassis frame. predictWallRange is
+ * Each beam is Robot::Range::TRACKING_OFFSET from the tracking centre.
+ * The pose passed to predictWallRange is that point. predictWallRange is
  * the measurement model shared by the particle filter, the EKF, and MockDrive.
- * solveRanges recovers x/y from ranges when heading is already known.
+ * solveRanges recovers the tracking centre from ranges when heading is known.
  * nudgePosition moves an existing x/y a fraction of the way toward those
  * ranges and leaves heading alone.
  * ------------------------------------------------------------------------- */
@@ -33,7 +34,8 @@ namespace wallrange {
 
 WallHit predictWallRange(const Pose2d& pose, int sensor_index);
 
-// Beam length only. cos_th/sin_th are the chassis heading; cos_yaw/sin_yaw are
+// Beam length only. cos_th/sin_th are heading_cos/heading_sin of the chassis
+// heading (0 along +y); cos_yaw/sin_yaw are
 // the mount yaw, so a caller can rotate every particle with one sin/cos pair.
 // Returns a negative number when the ray misses the field perimeter.
 double beamRange(double x, double y, double cos_th, double sin_th,
@@ -46,8 +48,10 @@ float beamRange(float x, float y, float cos_th, float sin_th,
 RangeSolve solveRanges(double theta, const DistanceReading* distance, int count);
 
 // One damped x/y step toward the wall ranges at a fixed heading. gain is the
-// fraction of the least-squares step to apply; step_m caps it. A beam that
-// disagrees with the others is left out. Returns false when no step is taken.
+// fraction of the least-squares step to apply; step_m caps it. One beam is
+// not a fix: a flicker on the only live sensor walks the pose while the
+// wheels are stopped. A beam that disagrees with the others is left out.
+// Returns false when no step is taken.
 bool nudgePosition(double& x, double& y, double theta,
                    const DistanceReading* distance, int count,
                    double gain, double step_m, double gate_m);

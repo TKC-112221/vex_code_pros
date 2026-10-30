@@ -1,30 +1,31 @@
 #pragma once
 /* ---------------------------------------------------------------------------
  * Odometry  --  trapezoidal dead-reckoning integrator (pure math helper).
- * Advances a Pose2d given a forward distance increment and an absolute heading,
- * using the midpoint heading to reduce integration drift. Ported from v1's
- * Odometry::update. Shared by OdometryEstimator and KalmanEstimator.
+ * Advances the tracking point (the front middle) from the geometric
+ * center's travel and an absolute heading. The midpoint heading reduces
+ * integration drift. Shared by OdometryEstimator and KalmanEstimator.
  * ------------------------------------------------------------------------- */
 
 #include "core/Types.h"
 #include "core/Specs.h"
 #include "math/MathUtils.h"
-#include <cmath>
+#include "math/TrackingCenter.h"
 
 class Odometry {
 public:
     // Meters. OdometryEstimator converts to inches when it publishes.
-    // The default pose is the geometric center of the field.
-    Pose2d pose{Robot::Range::CENTER_X_M, Robot::Range::CENTER_Y_M, 0.0};
+    // The default is the front of a robot whose center is the field center.
+    Pose2d pose = tracking::origin();
 
-    // forward_delta: meters travelled along heading since last call
-    // strafe_delta : meters travelled sideways (left +); 0 for a differential drive
+    // forward_delta: meters the geometric center travelled along heading
+    // strafe_delta : meters the center travelled sideways (left +)
     // heading_rad  : new absolute heading
     void update(double forward_delta, double strafe_delta, double heading_rad) {
-        double d_theta = mathutil::normalize_angle(heading_rad - pose.theta);
-        double theta_mid = pose.theta + d_theta / 2.0;
-        pose.x += forward_delta * std::cos(theta_mid) - strafe_delta * std::sin(theta_mid);
-        pose.y += forward_delta * std::sin(theta_mid) + strafe_delta * std::cos(theta_mid);
+        const double theta0 = pose.theta;
+        const double d_theta = mathutil::normalize_angle(heading_rad - theta0);
+        const double theta_mid = theta0 + d_theta / 2.0;
+        tracking::integrate(pose.x, pose.y, theta0, heading_rad,
+                            forward_delta, strafe_delta, theta_mid);
         pose.theta = heading_rad;
     }
 
