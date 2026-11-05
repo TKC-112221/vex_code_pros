@@ -32,12 +32,22 @@ struct ContactStep {
     double yaw_rad = 0;   // unwrapped heading change over dt
 };
 
-// skid_tau_sec bleeds roller side-slip between contact updates.
-// speed_limit_mps is the wheel-speed ceiling the plant already uses.
-ContactStep stepContacts(ContactBody& body, double dt,
-                         double skid_tau_sec, double speed_limit_mps);
+// Mass and yaw scale are the same rigid body the motor step integrates.
+// lateral_friction_n is roller Coulomb. skid_tau_sec is the viscous bleed.
+// speed_limit_mps is a safety ceiling, wider than the motor's free speed.
+struct ContactParams {
+    double skid_tau_sec = 0.3;
+    double speed_limit_mps = 4.0;
+    double mass_kg = 6.0;
+    double yaw_inertia_scale = 1.0;
+    double lateral_friction_n = 0.0;
+};
+
+ContactStep stepContacts(ContactBody& body, double dt, const ContactParams& params);
 
 // The pose and the body velocity are already the end of a step. A corner
 // past a wall loses its into-wall speed, and the center slides back inside.
 // Heading is left alone. This does not integrate, bleed skid, or orbit a goal.
+// The one-argument form uses the compiled MockPlant mass and friction.
+void holdWallContact(ContactBody& body, const ContactParams& params);
 void holdWallContact(ContactBody& body);

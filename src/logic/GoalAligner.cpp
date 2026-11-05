@@ -16,8 +16,10 @@ namespace {
 
 int g_latched = -1;
 // Reverse, or a negative wheel speed, sets this for the rest of the physics
-// step. goalAlignPhysicsDone clears it once the grab has finished.
+// step. goalAlignPhysicsDone clears it once the grab has finished, unless
+// a hold-off is keeping the grab suppressed across steps.
 bool g_suppress = false;
+bool g_hold_off = false;
 // The firmware keeps the grab. A scoring rollout turns it off.
 bool g_enabled = true;
 
@@ -83,16 +85,28 @@ void goalAlignRelease() {
     g_suppress = true;
 }
 
+void goalAlignHoldOff() {
+    g_latched = -1;
+    g_suppress = true;
+    g_hold_off = true;
+}
+
+void goalAlignClearHoldOff() {
+    g_hold_off = false;
+    g_suppress = false;
+}
+
 void goalAlignSetEnabled(bool enabled) {
     g_enabled = enabled;
     if (!enabled) {
         g_latched = -1;
         g_suppress = false;
+        g_hold_off = false;
     }
 }
 
 void goalAlignPhysicsDone() {
-    g_suppress = false;
+    if (!g_hold_off) g_suppress = false;
 }
 
 int goalAlignIndex() {

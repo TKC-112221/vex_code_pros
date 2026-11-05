@@ -809,22 +809,21 @@ void drawRoutePreview(HDC mem, int x, int y, int w, int h) {
     drawPreview(mem, cx, cy, scale);
 }
 
-// Knobs a controller overfits. Off the compiled plant, a short lag or a late
-// voltage oscillates, a long lag or a low gain undershoots, and extra speed
-// or a long skid runs past the target. Side resistance is omitted: it changes
-// reported current and does not move the wheels.
-// Friction, velocity, and acceleration are split into forward and yaw. The
-// compiled tick is no friction and a scale of 1, which keeps the shared lag.
+// Knobs a controller overfits, in the same units the motor step integrates.
+// A heavier robot, a lower top speed, or more friction falls short. A higher
+// launch acceleration or a later voltage oscillates. Side resistance is not
+// here: it changes reported current, and torque only when that current hits
+// the V5 limit.
 constexpr int kKnobDelay = 0;
-constexpr int kKnobLag = 1;
-constexpr int kKnobSpeed = 2;
-constexpr int kKnobSkid = 3;
-constexpr int kKnobLinFriction = 4;
-constexpr int kKnobLinVel = 5;
-constexpr int kKnobLinAccel = 6;
-constexpr int kKnobAngFriction = 7;
-constexpr int kKnobAngVel = 8;
-constexpr int kKnobAngAccel = 9;
+constexpr int kKnobMass = 1;
+constexpr int kKnobVel = 2;
+constexpr int kKnobAccel = 3;
+constexpr int kKnobFriction = 4;
+constexpr int kKnobYawInertia = 5;
+constexpr int kKnobYawFriction = 6;
+constexpr int kKnobSkid = 7;
+constexpr int kKnobLatFriction = 8;
+constexpr int kKnobTraction = 9;
 constexpr int kKnobCount = 10;
 
 // Ports the domain test can unplug. Order matches the chips under the sliders.
@@ -847,37 +846,37 @@ struct Knob {
 constexpr Knob kKnobs[kKnobCount] = {
     {"Voltage delay", "late volts oscillate a tuned loop", "ms",
      0.0, 120.0, 0.0, 10.0},
-    {"Velocity lag", "short oscillates, long undershoots", "s",
-     0.02, 0.80, MockPlant::VELOCITY_TAU_SEC, 0.0},
-    {"Speed scale", "high runs past, low stops short", "x",
-     0.40, 1.80, MockPlant::SPEED_SCALE, 0.0},
+    {"Mass", "heavier hits harder and resists the motors", "kg",
+     3.0, 12.0, MockPlant::MASS_KG, 0.0},
+    {"Max velocity", "steady speed with both sides at 12 V", "m/s",
+     0.8, 5.0, MockPlant::MAX_VEL_MPS, 0.0},
+    {"Max acceleration", "from a stop at 12 V, after friction", "m/s2",
+     1.0, 18.0, MockPlant::DRIVE_ACCEL_MPS2, 0.0},
+    {"Static friction", "force required before it rolls", "N",
+     0.0, 25.0, MockPlant::STATIC_FRICTION_N, 0.0},
+    {"Yaw inertia", "1 is a uniform rectangle", "x",
+     0.3, 2.5, MockPlant::YAW_INERTIA_SCALE, 0.0},
+    {"Yaw friction", "torque required before it spins", "Nm",
+     0.0, 4.0, MockPlant::YAW_FRICTION_NM, 0.0},
     {"Skid time", "long slides past the path", "s",
      0.04, 1.50, MockPlant::SKID_TAU_SEC, 0.0},
-    {"Linear friction", "forward volts lost before it rolls", "V",
-     0.0, 3.0, 0.0, 0.1},
-    {"Linear velocity", "scales settled forward speed", "x",
-     0.25, 1.75, 1.0, 0.0},
-    {"Linear acceleration", "high oscillates, low lags the drive", "x",
-     0.25, 1.75, 1.0, 0.0},
-    {"Angular friction", "VR-VL volts lost before it yaws", "V",
-     0.0, 6.0, 0.0, 0.1},
-    {"Angular velocity", "scales settled yaw rate", "x",
-     0.25, 1.75, 1.0, 0.0},
-    {"Angular acceleration", "high oscillates, low lags the turn", "x",
-     0.25, 1.75, 1.0, 0.0},
+    {"Lateral friction", "roller force before a sideways slide", "N",
+     0.0, 20.0, MockPlant::LATERAL_FRICTION_N, 0.0},
+    {"Traction", "grip before a wheel slips", "mu",
+     0.3, 1.8, MockPlant::TRACTION_MU, 0.0},
 };
 
 double g_knob[kKnobCount] = {
     kKnobs[kKnobDelay].original,
-    kKnobs[kKnobLag].original,
-    kKnobs[kKnobSpeed].original,
+    kKnobs[kKnobMass].original,
+    kKnobs[kKnobVel].original,
+    kKnobs[kKnobAccel].original,
+    kKnobs[kKnobFriction].original,
+    kKnobs[kKnobYawInertia].original,
+    kKnobs[kKnobYawFriction].original,
     kKnobs[kKnobSkid].original,
-    kKnobs[kKnobLinFriction].original,
-    kKnobs[kKnobLinVel].original,
-    kKnobs[kKnobLinAccel].original,
-    kKnobs[kKnobAngFriction].original,
-    kKnobs[kKnobAngVel].original,
-    kKnobs[kKnobAngAccel].original,
+    kKnobs[kKnobLatFriction].original,
+    kKnobs[kKnobTraction].original,
 };
 // True while that port is unplugged. Connected is the compiled robot.
 bool g_sensor_off[kSensCount] = {};
@@ -1072,8 +1071,8 @@ void drawPlantPanel(HDC mem, int fieldX, int fieldW) {
         RECT caption{left, cursor, right, cursor + 36};
         cursor = caption.bottom + 8;
 
-        // Shared plant on the left. Forward and yaw friction, speed, and
-        // rise time on the right, so all ten stay above the robot.
+        // Mass and the speed limits on the left. Friction, yaw, and grip
+        // on the right, so all ten stay above the robot.
         RECT resets[kKnobCount]{};
         RECT tracks[kKnobCount]{};
         const int colGap = 14;
@@ -1087,8 +1086,8 @@ void drawPlantPanel(HDC mem, int fieldX, int fieldW) {
             resets[index] = RECT{x1 - 52, y, x1, y + 18};
             tracks[index] = RECT{x0, y + 34, x1, y + 42};
         };
-        for (int i = 0; i < kKnobLinFriction; ++i) place(i, 0, i);
-        for (int i = 0; i < axisRows; ++i) place(kKnobLinFriction + i, 1, i);
+        for (int i = 0; i < kKnobFriction; ++i) place(i, 0, i);
+        for (int i = 0; i < axisRows; ++i) place(kKnobFriction + i, 1, i);
         cursor += axisRows * stride + 4;
         RECT sensCaption{left, cursor, right, cursor + 46};
         cursor = sensCaption.bottom + 6;
@@ -1549,15 +1548,15 @@ namespace fieldwindow {
 PlantOverride plantOverride() {
     std::lock_guard<std::mutex> guard(g_plant_mu);
     PlantOverride over;
-    over.velocity_tau_sec = g_knob[kKnobLag];
+    over.mass_kg = g_knob[kKnobMass];
+    over.max_vel_mps = g_knob[kKnobVel];
+    over.drive_accel_mps2 = g_knob[kKnobAccel];
+    over.static_friction_n = g_knob[kKnobFriction];
+    over.yaw_inertia_scale = g_knob[kKnobYawInertia];
+    over.yaw_friction_nm = g_knob[kKnobYawFriction];
     over.skid_tau_sec = g_knob[kKnobSkid];
-    over.speed_scale = g_knob[kKnobSpeed];
-    over.lin_friction_v = g_knob[kKnobLinFriction];
-    over.lin_vel_scale = g_knob[kKnobLinVel];
-    over.lin_accel_scale = g_knob[kKnobLinAccel];
-    over.ang_friction_v = g_knob[kKnobAngFriction];
-    over.ang_vel_scale = g_knob[kKnobAngVel];
-    over.ang_accel_scale = g_knob[kKnobAngAccel];
+    over.lateral_friction_n = g_knob[kKnobLatFriction];
+    over.traction_mu = g_knob[kKnobTraction];
     const double tick_ms = System::DT_SEC * 1000.0;
     int ticks = 0;
     if (tick_ms > 1e-6) ticks = (int)std::lround(g_knob[kKnobDelay] / tick_ms);

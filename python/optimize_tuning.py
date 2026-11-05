@@ -12,7 +12,9 @@ Stage 2 searches the knobs that move a rollout, all in one CMA-ES run:
     segment follower's Stanley gains and pivot threshold. DriveTo's
     curve leg is the drift rollout. DriveTo with segmentPath() is the
     segment rollout. TurnTo is a pivot in place. The volts for all
-    three come from the same feedforward; the search does not fit a
+    three come from the same feedforward, written onto the drivebase
+    before each rollout. The follower commands a yaw rate, and that
+    drivebase model turns it into volts. The search does not fit a
     second kV or kA for the pivot. The saturation speed is not searched. It
     is the plant's top speed, so the volts for a hold match the chassis
     that is actually rolling. A slower model cannot brake, and the plant
@@ -170,10 +172,16 @@ def wrap(angle):
 def nominal():
     """Compiled Tuning.h / MockDriveParams.h values exported by the plant."""
     return {
-        "VELOCITY_TAU": float(plant.VELOCITY_TAU),
+        "MASS_KG": float(plant.MASS_KG),
+        "MAX_VEL_MPS": float(plant.MAX_VEL_MPS),
+        "DRIVE_ACCEL": float(plant.DRIVE_ACCEL),
+        "STATIC_FRICTION_N": float(plant.STATIC_FRICTION_N),
+        "YAW_INERTIA_SCALE": float(plant.YAW_INERTIA_SCALE),
+        "YAW_FRICTION_NM": float(plant.YAW_FRICTION_NM),
         "SKID_TAU": float(plant.SKID_TAU),
+        "LATERAL_FRICTION_N": float(plant.LATERAL_FRICTION_N),
+        "TRACTION_MU": float(plant.TRACTION_MU),
         "SIDE_RESISTANCE": float(plant.SIDE_RESISTANCE),
-        "SPEED_SCALE": float(plant.SPEED_SCALE),
         "KS_LIN": float(plant.KS_LIN),
         "LIN_SPEED_AT_SAT": float(plant.LIN_SPEED_AT_SAT),
         "LIN_ACCEL_AT_FULL_V": float(plant.LIN_ACCEL_AT_FULL_V),
@@ -212,14 +220,22 @@ def nominal():
 # before CMA-ES, so one step size covers every knob. A zero nominal uses
 # an absolute box; a multiplicative box around zero cannot move.
 BOUNDS = {
-    "VELOCITY_TAU": (0.03, 0.60),
+    "MASS_KG": (2.0, 14.0),
+    "MAX_VEL_MPS": (0.5, 6.0),
+    "DRIVE_ACCEL": (0.5, 24.0),
+    "STATIC_FRICTION_N": (0.0, 40.0),
+    "YAW_INERTIA_SCALE": (0.25, 3.0),
+    "YAW_FRICTION_NM": (0.0, 5.0),
     "SKID_TAU": (0.05, 1.20),
+    "LATERAL_FRICTION_N": (0.0, 30.0),
+    "TRACTION_MU": (0.2, 2.0),
     "SIDE_RESISTANCE": (0.40, 6.00),
-    "SPEED_SCALE": (0.50, 1.50),
     "KS_LIN": (0.0, 1.5),
     "LIN_SPEED_AT_SAT": (1.0, 8.0),
     "LIN_ACCEL_AT_FULL_V": (1.0, 15.0),
-    "KS_ANG": (0.0, 1.5),
+    # V_R - V_L. 24 V is both sides on opposite rails, the most static
+    # yaw the motors can apply. Past that, the chassis clamp is identical.
+    "KS_ANG": (0.0, 24.0),
     "ANG_RATE_PER_VOLT": (1.0, 12.0),
     "ANG_LEVER_M": (0.15, 0.60),
     "ANG_KA_COEFF": (0.4, 8.0),
@@ -290,6 +306,8 @@ def require_plant():
     missing = []
     if not hasattr(plant.PlantSim, "set_dynamics"):
         missing.append("PlantSim.set_dynamics")
+    if not hasattr(plant.PlantSim, "set_feedforward"):
+        missing.append("PlantSim.set_feedforward")
     if not hasattr(plant.PlantSim, "set_goal_align"):
         missing.append("PlantSim.set_goal_align")
     if not hasattr(plant.DriftGuide, "configure"):
@@ -306,7 +324,9 @@ def require_plant():
         missing.append("SegmentGuide")
     if not hasattr(plant.PlantSim, "localize_reset"):
         missing.append("PlantSim.localize_reset")
-    for name in ("SETTLE_LARGE_IN", "SETTLE_LARGE_DEG", "SETTLE_SMALL_S", "SETTLE_LARGE_S"):
+    for name in ("SETTLE_LARGE_IN", "SETTLE_LARGE_DEG", "SETTLE_SMALL_S", "SETTLE_LARGE_S",
+                 "MASS_KG", "MAX_VEL_MPS", "DRIVE_ACCEL", "STATIC_FRICTION_N",
+                 "YAW_INERTIA_SCALE", "YAW_FRICTION_NM", "LATERAL_FRICTION_N", "TRACTION_MU"):
         if not hasattr(plant, name):
             missing.append(name)
     if missing:
@@ -321,6 +341,16 @@ def require_plant():
             raise SystemExit(f"{key} compiled value {value} is outside [{lo}, {hi}]")
 
 
+def apply_plant(sim, values):
+    """Write the rigid-body motor onto the simulator."""
+    sim.set_dynamics(
+        values["MASS_KG"], values["MAX_VEL_MPS"], values["DRIVE_ACCEL"],
+        values["STATIC_FRICTION_N"], values["SKID_TAU"], values["SIDE_RESISTANCE"],
+        values["YAW_INERTIA_SCALE"], values["YAW_FRICTION_NM"],
+        values["LATERAL_FRICTION_N"], values["TRACTION_MU"],
+    )
+
+
 def feedforward(values):
     """Same formulas as Feedforward:: in include/core/Tuning.h."""
     volts = float(plant.MAX_VOLTS)
@@ -333,6 +363,11 @@ def feedforward(values):
     ka_ang = (values["ANG_KA_COEFF"] * (2.0 * values["ANG_KA_LENGTH_M"])
               / (motors * values["ANG_LEVER_M"]))
     return ks_lin, kv_lin, ka_lin, ks_ang, kv_ang, ka_ang
+
+
+def apply_feedforward(sim, values):
+    """Write kS, kV, and kA onto the drivebase that turns rad/s into volts."""
+    sim.set_feedforward(*feedforward(values))
 
 
 def configure(guide, values, practice_accel):
@@ -672,6 +707,7 @@ def _family_mean(rows):
 def score_tracking(guide, segment, turn, sim, values, ticks, goals=None):
     """Mean of the drift, segment, and turn families, plus every row."""
     goals = GOALS if goals is None else goals
+    apply_feedforward(sim, values)
     drift_rows = []
     segment_rows = []
     for practice in (True, False):
@@ -746,9 +782,7 @@ def plant_cost(sim, rows, values, window, windows, use_current):
         starts = [int(round(i * last / max(windows - 1, 1))) for i in range(windows)]
     total = 0.0
     samples = 0
-    sim.set_dynamics(
-        values["VELOCITY_TAU"], values["SKID_TAU"],
-        values["SIDE_RESISTANCE"], values["SPEED_SCALE"])
+    apply_plant(sim, values)
     for start in starts:
         frame = rows[start]
         sim.reset(frame["x_in"], frame["y_in"], frame["theta"],
@@ -928,10 +962,16 @@ def write_paste(path, values, notes, held_reason):
         "",
         "#if TUNING_PASTE_PART == 1",
         "// MockPlant  (include/hardware/MockDriveParams.h)",
-        f"constexpr double VELOCITY_TAU_SEC = {cpp_num(values['VELOCITY_TAU'])};",
+        f"constexpr double MASS_KG = {cpp_num(values['MASS_KG'])};",
+        f"constexpr double MAX_VEL_MPS = {cpp_num(values['MAX_VEL_MPS'])};",
+        f"constexpr double DRIVE_ACCEL_MPS2 = {cpp_num(values['DRIVE_ACCEL'])};",
+        f"constexpr double STATIC_FRICTION_N = {cpp_num(values['STATIC_FRICTION_N'])};",
+        f"constexpr double YAW_INERTIA_SCALE = {cpp_num(values['YAW_INERTIA_SCALE'])};",
+        f"constexpr double YAW_FRICTION_NM = {cpp_num(values['YAW_FRICTION_NM'])};",
         f"constexpr double SKID_TAU_SEC = {cpp_num(values['SKID_TAU'])};",
+        f"constexpr double LATERAL_FRICTION_N = {cpp_num(values['LATERAL_FRICTION_N'])};",
+        f"constexpr double TRACTION_MU = {cpp_num(values['TRACTION_MU'])};",
         f"constexpr double SIDE_RESISTANCE_OHM = {cpp_num(values['SIDE_RESISTANCE'])};",
-        f"constexpr double SPEED_SCALE = {cpp_num(values['SPEED_SCALE'])};",
         "#elif TUNING_PASTE_PART == 2",
         "// Feedforward  (include/core/Tuning.h)",
         f"constexpr double KS_LIN = {cpp_num(values['KS_LIN'])};",
@@ -1008,7 +1048,7 @@ HELD = (
     "The guide is scored on the true plant pose and commanded from odometry. Estimator gains are not in this search.",
     "Turn settle window, fallback kV/kA, and the leftover-speed brake. The pivot plan uses the searched caps, and the volts are the shared feedforward.",
     "Segment pivot_done_rad. Stanley k, the soft speed, and the pivot threshold are searched. Path accel and the heading trim are the shared knobs.",
-    "LIN_SPEED_AT_SAT is the plant top speed, MAX_VEL_LIN * SPEED_SCALE. Searching it made the feedforward hold a slower robot than the plant, so full volts could not brake and the chassis ran through the goal.",
+    "LIN_SPEED_AT_SAT is the plant top speed, MAX_VEL_MPS. Searching it made the feedforward hold a slower robot than the plant, so full volts could not brake and the chassis ran through the goal.",
     "ANG_KA_MOTOR_COUNT is the motor count from the fit, not a gain.",
     "MockDrive confidence, range period, and reported temperature do not move the chassis.",
 )
@@ -1084,7 +1124,7 @@ def main():
         if args.log is None:
             notes.append(
                 "Stage 1 kept the compiled MockDrive plant. Pass --log a LogFrame "
-                "recording to fit tau, skid, resistance, and speed scale."
+                "recording to fit mass, top speed, acceleration, and friction."
             )
             print(notes[-1])
         else:
@@ -1097,14 +1137,22 @@ def main():
                 print(notes[-1])
             else:
                 use_current = log_has_current(rows)
-                keys = ["VELOCITY_TAU", "SKID_TAU", "SPEED_SCALE"]
+                keys = [
+                    "MASS_KG", "MAX_VEL_MPS", "DRIVE_ACCEL", "STATIC_FRICTION_N",
+                    "YAW_INERTIA_SCALE", "YAW_FRICTION_NM", "SKID_TAU",
+                    "LATERAL_FRICTION_N", "TRACTION_MU",
+                ]
                 if use_current:
                     keys.append("SIDE_RESISTANCE")
-                    notes.append("Stage 1 fit resistance against logged motor current.")
+                    notes.append(
+                        "Stage 1 fit resistance against logged motor current. "
+                        "It also caps stall torque once current hits the V5 limit."
+                    )
                 else:
                     notes.append(
-                        "Stage 1 held SIDE_RESISTANCE. The log current is ~0, and with "
-                        "the current limit off, resistance does not change the motion."
+                        "Stage 1 held SIDE_RESISTANCE. The log current is ~0. "
+                        "Resistance does not change the motion until stall current "
+                        "would pass the V5 limit."
                     )
                 print("stage 1 plant  " + ", ".join(keys))
                 values, score = cma_minimize(
@@ -1112,20 +1160,16 @@ def main():
                     lambda trial: plant_cost(sim, rows, trial, window, windows, use_current),
                     generations, args.seed)
                 notes.append(f"Stage 1 cost {score:.6g}.")
-                sim.set_dynamics(
-                    values["VELOCITY_TAU"], values["SKID_TAU"],
-                    values["SIDE_RESISTANCE"], values["SPEED_SCALE"])
+                apply_plant(sim, values)
 
     # Volts for a measured speed have to mean that speed on this plant.
     # Leaving the saturation speed free lets the search describe a slower
     # robot. The hold voltage then sits on the rail and the plant, which is
     # still below its real top speed, cannot be braked.
-    values["LIN_SPEED_AT_SAT"] = float(plant.MAX_VEL_LIN) * values["SPEED_SCALE"]
+    values["LIN_SPEED_AT_SAT"] = values["MAX_VEL_MPS"]
 
     if args.stage in ("all", "gains"):
-        sim.set_dynamics(
-            values["VELOCITY_TAU"], values["SKID_TAU"],
-            values["SIDE_RESISTANCE"], values["SPEED_SCALE"])
+        apply_plant(sim, values)
         goals = goals_with_shape(args.shape, args.timed_elastic)
         print(f"stage 2 pose  shape {args.shape}")
         print("  " + ", ".join(TRACK_KEYS))

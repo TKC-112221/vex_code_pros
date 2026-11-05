@@ -33,11 +33,18 @@ CommandVector goalAlignOverride(const CommandVector& commands,
 // same step that is still overlapping the point.
 void goalAlignRelease();
 
+// Let go and keep the grab off across physics steps. Score retreat uses this
+// so a bumper still overlapping the point cannot re-latch while backing up.
+// goalAlignClearHoldOff() (or disabling the aligner) ends the hold.
+void goalAlignHoldOff();
+void goalAlignClearHoldOff();
+
 // The grab and the stick override. The firmware leaves this on. A rollout
 // turns it off so a bumper touch does not replace the commanded motion.
 void goalAlignSetEnabled(bool enabled);
 
 // Close the one-tick release window. stepContacts calls this after the grab.
+// A hold-off from goalAlignHoldOff() stays until cleared.
 void goalAlignPhysicsDone();
 
 // Latched Field::Point index, or -1. The field window draws that goal hot.

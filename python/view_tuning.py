@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import plant
 from optimize_tuning import (
     COMMAND_DELAY_TICKS, SHAPES, START_X_IN, START_Y_IN, PoseSettle,
-    configure, delayed_step, goals_with_shape, localization_seed,
+    apply_feedforward, configure, delayed_step, goals_with_shape, localization_seed,
     nominal, require_plant, wrap,
 )
 
@@ -66,6 +66,7 @@ _RENAME = {
     "VELOCITY_TAU_SEC": "VELOCITY_TAU",
     "SKID_TAU_SEC": "SKID_TAU",
     "SIDE_RESISTANCE_OHM": "SIDE_RESISTANCE",
+    "DRIVE_ACCEL_MPS2": "DRIVE_ACCEL",
     "MIN_ACCEL_MPS2": "MIN_ACCEL",
     "MAX_ACCEL_MPS2": "PRACTICE_ACCEL",
     "TURN_RADIUS_MAX_M": "TURN_RADIUS_MAX",
@@ -87,8 +88,10 @@ def load_paste(path):
 
 def apply_plant(sim, values):
     sim.set_dynamics(
-        values["VELOCITY_TAU"], values["SKID_TAU"],
-        values["SIDE_RESISTANCE"], values["SPEED_SCALE"])
+        values["MASS_KG"], values["MAX_VEL_MPS"], values["DRIVE_ACCEL"],
+        values["STATIC_FRICTION_N"], values["SKID_TAU"], values["SIDE_RESISTANCE"],
+        values["YAW_INERTIA_SCALE"], values["YAW_FRICTION_NM"],
+        values["LATERAL_FRICTION_N"], values["TRACTION_MU"])
 
 
 def planned_path(guide):
@@ -130,6 +133,7 @@ def peak_cross_in(states, path_x, path_y):
 def rollout(guide, sim, values, goal, practice, ticks):
     tx, ty, heading, exit_speed, shape, timed_elastic = goal
     apply_plant(sim, values)
+    apply_feedforward(sim, values)
     configure(guide, values, practice)
     guide.begin(tx, ty, heading, exit_speed, False, False, shape, timed_elastic)
     path_x, path_y = planned_path(guide)

@@ -64,7 +64,7 @@ public:
         const double v_wheel = forward / dt_sec;
         const double omega = std::isfinite(obs.v_ang) ? obs.v_ang : 0.0;
         const double tau = MockPlant::SKID_TAU_SEC;
-        const double limit = Robot::MAX_VEL_LIN * MockPlant::SPEED_SCALE;
+        const double limit = MockPlant::MAX_VEL_MPS;
         double v_lat = 0.0;
         if (tau > 1.0e-4) {
             const double decay = std::exp(-dt_sec / tau);

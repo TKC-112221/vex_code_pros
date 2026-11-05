@@ -263,6 +263,7 @@ void GoalScore::cancel() {
     approach_live_ = false;
     detach_set_ = false;
     detach_live_ = false;
+    goalAlignClearHoldOff();
 }
 
 void GoalScore::aimAt(double x_in, double y_in) {
@@ -510,6 +511,20 @@ void GoalScore::enterDrop(const CascadeReading& sense, uint32_t now_ms) {
     if (drop_target_ < 0.0) drop_target_ = 0.0;
 }
 
+void GoalScore::armRetreat(const StateEstimate& state) {
+    // Leave on the detach heading when one was given, even if the drop timed
+    // out before the nose finished the swing. A short reverse does not need
+    // other-goal keep-outs; those circles can invent a path that never leaves.
+    const double leave = detach_live_ ? detach_live_rad_ : state.pose.theta;
+    const double c = mathutil::heading_cos(leave);
+    const double s = mathutil::heading_sin(leave);
+    Pose2d back = state.pose;
+    back.theta = leave;
+    back.x -= GoalScoreTune::kBackupIn * c;
+    back.y -= GoalScoreTune::kBackupIn * s;
+    armDrive(back, true, 0.0, false);
+}
+
 void GoalScore::enterRetreat(const StateEstimate& state, uint32_t now_ms,
                              IMacroController& macros, SubsystemCommand& out) {
     phase_ = Phase::Retreat;
@@ -518,12 +533,10 @@ void GoalScore::enterRetreat(const StateEstimate& state, uint32_t now_ms,
     const double grown = CascadeLift::clampHeight(
         Field::goalHeightIn(goal_) + GoalScoreTune::kPieceIn);
     Field::setGoalHeightIn(goal_, grown);
-    const double c = mathutil::heading_cos(state.pose.theta);
-    const double s = mathutil::heading_sin(state.pose.theta);
-    Pose2d back = state.pose;
-    back.x -= GoalScoreTune::kBackupIn * c;
-    back.y -= GoalScoreTune::kBackupIn * s;
-    armDrive(back, true, 0.0, true);
+    // Drop kept the bumper seated (and the plant snap latched). Hold the grab
+    // off for the whole reverse so a still-overlapping nose cannot reattach.
+    goalAlignHoldOff();
+    armRetreat(state);
     // The latch drive and the drop are done. The backup has not moved yet.
     released_claw_ = true;
     out.pneumatics_b_state = GoalScoreTune::kClawReleased;
@@ -651,9 +664,17 @@ GoalScoreOutput GoalScore::apply(const SubsystemCommand& driver,
             out.command.pneumatics_b_state = GoalScoreTune::kClawReleased;
             if (!backup_done_) {
                 out.drive = nav_.compute(state);
-                // Stuck in the goal is not a reason to keep driving. The
-                // lift still has until the retreat timer to come down.
-                if (nav_.settled() || nav_.stuck()) backup_done_ = true;
+                // Clear of the standoff, or settled on the reverse target, is a
+                // real leave. Stuck on the post is not: re-plan reverse and keep
+                // trying until the retreat timer.
+                const bool clear = !closeToGoal(state.pose, GoalScoreTune::kStandoffIn);
+                if (nav_.settled() || clear) {
+                    backup_done_ = true;
+                } else if (nav_.stuck()) {
+                    goalAlignHoldOff();
+                    armRetreat(state);
+                    out.drive = nav_.compute(state);
+                }
             }
             if (backup_done_) {
                 out.drive_active = false;
@@ -662,6 +683,7 @@ GoalScoreOutput GoalScore::apply(const SubsystemCommand& driver,
             if (timedOut(now_ms, GoalScoreTune::kRetreatTimeoutMs)
                 || (backup_done_ && cascadeLift().atTarget(0.0, sense))) {
                 phase_ = Phase::Idle;
+                goalAlignClearHoldOff();
                 out.drive_active = false;
                 out.drive = ChassisCommand{};
             }

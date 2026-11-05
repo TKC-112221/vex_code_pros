@@ -121,8 +121,20 @@ public:
 
     MockDrive::PlantSnapshot state() const { return drive_.plantSnapshot(); }
 
-    void setDynamics(double velocity_tau, double skid_tau, double resistance, double speed_scale) {
-        drive_.setDynamics(velocity_tau, skid_tau, resistance, speed_scale);
+    void setDynamics(double mass_kg, double max_vel_mps, double drive_accel_mps2,
+                     double static_friction_n, double skid_tau, double resistance,
+                     double yaw_inertia_scale, double yaw_friction_nm,
+                     double lateral_friction_n, double traction_mu) {
+        drive_.setDynamics(mass_kg, max_vel_mps, drive_accel_mps2, static_friction_n,
+                           skid_tau, resistance, yaw_inertia_scale, yaw_friction_nm,
+                           lateral_friction_n, traction_mu);
+    }
+
+    // The drivebase copy. stepVelocity commands a yaw rate, and applyDrive
+    // turns it into volts with this model. The follower's own copy is separate.
+    void setFeedforward(double ks_lin, double kv_lin, double ka_lin,
+                        double ks_ang, double kv_ang, double ka_ang) {
+        feedforward_.setGains(ks_lin, kv_lin, ka_lin, ks_ang, kv_ang, ka_ang);
     }
 
     MockDrive::Dynamics dynamics() const { return drive_.dynamics(); }
@@ -545,11 +557,16 @@ PYBIND11_MODULE(plant, m) {
         .def("state", &PlantSim::state)
         .def("estimate", &PlantSim::estimate)
         .def("set_dynamics", &PlantSim::setDynamics,
-             py::arg("velocity_tau"), py::arg("skid_tau"),
-             py::arg("resistance"), py::arg("speed_scale"))
+             py::arg("mass_kg"), py::arg("max_vel_mps"), py::arg("drive_accel_mps2"),
+             py::arg("static_friction_n"), py::arg("skid_tau"), py::arg("resistance"),
+             py::arg("yaw_inertia_scale"), py::arg("yaw_friction_nm"),
+             py::arg("lateral_friction_n"), py::arg("traction_mu"))
+        .def("set_feedforward", &PlantSim::setFeedforward,
+             py::arg("ks_lin"), py::arg("kv_lin"), py::arg("ka_lin"),
+             py::arg("ks_ang"), py::arg("kv_ang"), py::arg("ka_ang"))
         .def("dynamics", [](const PlantSim& sim) {
             const MockDrive::Dynamics d = sim.dynamics();
-            return py::make_tuple(d.velocity_tau, d.skid_tau, d.side_resistance, d.speed_scale);
+            return py::make_tuple(d.mass_kg, d.max_vel_mps, d.drive_accel_mps2, d.static_friction_n);
         })
         .def("set_goal_align", &PlantSim::setGoalAlign, py::arg("enabled"));
 
@@ -631,10 +648,20 @@ PYBIND11_MODULE(plant, m) {
     m.def("read_log", &readLog, py::arg("path"));
     m.attr("LOG_FRAME_BYTES") = static_cast<int>(sizeof(LogFrame));
     m.attr("DT_SEC") = System::DT_SEC;
-    m.attr("VELOCITY_TAU") = MockPlant::VELOCITY_TAU_SEC;
+    m.attr("MASS_KG") = MockPlant::MASS_KG;
+    m.attr("MAX_VEL_MPS") = MockPlant::MAX_VEL_MPS;
+    m.attr("DRIVE_ACCEL") = MockPlant::DRIVE_ACCEL_MPS2;
+    m.attr("STATIC_FRICTION_N") = MockPlant::STATIC_FRICTION_N;
+    m.attr("YAW_INERTIA_SCALE") = MockPlant::YAW_INERTIA_SCALE;
+    m.attr("YAW_FRICTION_NM") = MockPlant::YAW_FRICTION_NM;
     m.attr("SKID_TAU") = MockPlant::SKID_TAU_SEC;
+    m.attr("LATERAL_FRICTION_N") = MockPlant::LATERAL_FRICTION_N;
+    m.attr("TRACTION_MU") = MockPlant::TRACTION_MU;
     m.attr("SIDE_RESISTANCE") = MockPlant::SIDE_RESISTANCE_OHM;
-    m.attr("SPEED_SCALE") = MockPlant::SPEED_SCALE;
+    // Time constant of the linear motor, kA/kV, and top speed over the
+    // gearbox free speed. Older scripts read these names.
+    m.attr("VELOCITY_TAU") = MockPlant::MAX_VEL_MPS / MockPlant::DRIVE_ACCEL_MPS2;
+    m.attr("SPEED_SCALE") = MockPlant::MAX_VEL_MPS / Robot::MAX_VEL_LIN;
     m.attr("KS_LIN") = Feedforward::KS_LIN;
     m.attr("KV_LIN") = Feedforward::KV_LIN;
     m.attr("KA_LIN") = Feedforward::KA_LIN;

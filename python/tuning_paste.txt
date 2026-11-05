@@ -4,15 +4,23 @@
 //
 // KV_LIN, KA_LIN, KV_ANG, and KA_ANG stay formulas in Tuning.h. They
 // follow the knobs below. With these knobs they evaluate to
-//   KV_LIN 3.5501006   KA_LIN 0.83839784
-//   KV_ANG 0.26651564   KA_ANG 0.053414154
+//   KV_LIN 8.3239009   KA_LIN 1.6021427
+//   KV_ANG 2.2170846   KA_ANG 0.28122942
 //
 // Part 6 replaces Physics::TURN_RADIUS_MAX_M, including its alias to
 // data/generated_limits.h.
 //
 // Boomerang::CLOSE_IN is also DrivePolicy::kPositionToleranceIn.
 //
-// Stage 2 pose cost 0.7266 on Hermite + timed elastic (pop 20, restarts 1, generations 1000).
+// Part 8 is Turn::MAX_VEL_RAD_S and MAX_ACCEL_RAD_S2. The pivot's
+// volts stay the feedforward in part 2.
+//
+// Part 9 is Segment::STANLEY_K, STANLEY_SOFT, and PIVOT_RAD.
+//
+// Stage 1 fit resistance against logged motor current. It also caps stall torque once current hits the V5 limit.
+// Stage 1 cost 0.0389143 on D:/skills_auto.bin.
+// Part 2 feedforward rebuilt from that plant (breakaway volts and free-spin kV/kA), replacing the rail-eating KS_ANG=10 search.
+// Drift / heading / turn / segment gains restored to hand defaults so yaw no longer saturates the chassis rail.
 
 #ifndef TUNING_PASTE_PART
 #error "Include python/tuning_paste.txt with TUNING_PASTE_PART set to 1..9."
@@ -20,54 +28,58 @@
 
 #if TUNING_PASTE_PART == 1
 // MockPlant  (include/hardware/MockDriveParams.h)
-constexpr double VELOCITY_TAU_SEC = 0.15561395;
-constexpr double SKID_TAU_SEC = 0.27039079;
-constexpr double SIDE_RESISTANCE_OHM = 2.1634539;
-constexpr double SPEED_SCALE = 0.96013993;
+constexpr double MASS_KG = 4.8917701;
+constexpr double MAX_VEL_MPS = 1.3449657;
+constexpr double DRIVE_ACCEL_MPS2 = 6.9862388;
+constexpr double STATIC_FRICTION_N = 2.4641328;
+constexpr double YAW_INERTIA_SCALE = 0.65471728;
+constexpr double YAW_FRICTION_NM = 0.40336296;
+constexpr double SKID_TAU_SEC = 1.1042373;
+constexpr double LATERAL_FRICTION_N = 4.4052557;
+constexpr double TRACTION_MU = 1.6390494;
+constexpr double SIDE_RESISTANCE_OHM = 5.9966325;
 #elif TUNING_PASTE_PART == 2
 // Feedforward  (include/core/Tuning.h)
-constexpr double KS_LIN = 1.3922472;
-constexpr double KS_ANG = 0.024129751;
-constexpr double LIN_SPEED_AT_SAT = 2.9880147;
-constexpr double LIN_ACCEL_AT_FULL_V = 10.313014;
-constexpr double ANG_RATE_PER_VOLT = 2.0209893;
-constexpr double ANG_LEVER_M = 0.2637477;
-constexpr double ANG_KA_COEFF = 0.7720231;
-constexpr double ANG_KA_LENGTH_M = 0.054743933;
+constexpr double KS_LIN = 0.80704786;
+constexpr double KS_ANG = 1.953475;
+constexpr double LIN_SPEED_AT_SAT = 1.3449657;
+constexpr double LIN_ACCEL_AT_FULL_V = 7.4899691;
+constexpr double ANG_RATE_PER_VOLT = 11.085423;
+constexpr double ANG_LEVER_M = 0.4;
+constexpr double ANG_KA_COEFF = 2.2498354;
+constexpr double ANG_KA_LENGTH_M = 0.15;
 #elif TUNING_PASTE_PART == 3
 // Drift  (include/core/Tuning.h)
-constexpr double PATH_ACCEL = 2.5797194;
-constexpr double K_SLIP = 0.10148726;
-constexpr double A_MAX = 13.058915;
-constexpr double MAX_SLIP_RAD = 0.32241256;
-constexpr double LAT_KP = 8.2134879;
-constexpr double LAT_KI = 8.3214656;
-constexpr double LAT_KD = 3.6544256;
-constexpr double LAT_KD2 = 0.0016715113;
-constexpr double LAT_I_LIMIT = 4.5541252;
+constexpr double PATH_ACCEL = 3.0;
+constexpr double K_SLIP = 4.0;
+constexpr double A_MAX = 8.0;
+constexpr double MAX_SLIP_RAD = 0.6;
+constexpr double LAT_KP = 4.0;
+constexpr double LAT_KI = 0.2;
+constexpr double LAT_KD = 0.3;
+constexpr double LAT_KD2 = 0.0;
+constexpr double LAT_I_LIMIT = 1.0;
 #elif TUNING_PASTE_PART == 4
 // Motion  (include/core/Tuning.h)
-constexpr double MIN_ACCEL_MPS2 = 0.46548263;
+constexpr double MIN_ACCEL_MPS2 = 0.14862271;
 constexpr double KAPPA_EPS = 0.001;
 #elif TUNING_PASTE_PART == 5
 // Practice  (include/core/Tuning.h)
-constexpr double MAX_ACCEL_MPS2 = 3.1216836;
+constexpr double MAX_ACCEL_MPS2 = 3.0;
 #elif TUNING_PASTE_PART == 6
 // Physics::TURN_RADIUS_MAX_M  (include/core/Tuning.h)
 constexpr double TURN_RADIUS_MAX_M = 10.0;
 #elif TUNING_PASTE_PART == 7
 // Boomerang  (include/core/Tuning.h)
 constexpr Axis Lateral = {10.0, 0.0, 3.0, 3.0, 1.0, 100.0, 3.0, 500.0, 5.0};
-constexpr Axis Angular = {0.8589493, 1.9583466, 0.035739421, 2.1843992, 1.0, 100.0, 3.0, 500.0, 0.0};
-constexpr double CLOSE_IN = 14.633193;
+constexpr Axis Angular = {2.0, 0.0, 0.5, 3.0, 1.0, 100.0, 3.0, 500.0, 0.0};
+constexpr double CLOSE_IN = 14.698969;
 #elif TUNING_PASTE_PART == 8
 // Turn  (include/core/Tuning.h)
-// Hand defaults. The next optimize_tuning.py run replaces these.
 constexpr double MAX_VEL_RAD_S = 4.0;
 constexpr double MAX_ACCEL_RAD_S2 = 6.0;
 #elif TUNING_PASTE_PART == 9
 // Segment  (include/core/Tuning.h)
-// Hand defaults. The next optimize_tuning.py run replaces these.
 constexpr double STANLEY_K = 1.5;
 constexpr double STANLEY_SOFT = 0.3;
 constexpr double PIVOT_RAD = 0.87266463;
@@ -93,6 +105,8 @@ constexpr double PIVOT_RAD = 0.87266463;
 // DrivePolicy scales: they belong to the trained network, which this search does not run.
 // Particles, Slip, RangeLik, Ekf, ImuBias, SensorFilter, WallSolve, WallNudge: estimators.
 // The guide is scored on the true plant pose and commanded from odometry. Estimator gains are not in this search.
-// LIN_SPEED_AT_SAT is the plant top speed, MAX_VEL_LIN * SPEED_SCALE. Searching it made the feedforward hold a slower robot than the plant, so full volts could not brake and the chassis ran through the goal.
+// Turn settle window, fallback kV/kA, and the leftover-speed brake. The pivot plan uses the searched caps, and the volts are the shared feedforward.
+// Segment pivot_done_rad. Stanley k, the soft speed, and the pivot threshold are searched. Path accel and the heading trim are the shared knobs.
+// LIN_SPEED_AT_SAT is the plant top speed, MAX_VEL_MPS. Searching it made the feedforward hold a slower robot than the plant, so full volts could not brake and the chassis ran through the goal.
 // ANG_KA_MOTOR_COUNT is the motor count from the fit, not a gain.
 // MockDrive confidence, range period, and reported temperature do not move the chassis.

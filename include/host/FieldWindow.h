@@ -34,23 +34,23 @@ void setBrainFrame(const std::uint32_t* rgb, int width, int height);
 // Domain randomization for the host plant. The dropdown on the field
 // starts at the compiled plant, which is what the controller was tuned to.
 // Each slider puts back its own compiled value. Reset plant puts them all back.
-// Friction is volts removed before that axis moves. The velocity and
-// acceleration scales are 1 on the compiled plant: velocity scales the
-// settled speed, acceleration scales how fast that speed is approached.
-// A disconnected port reports nothing. Distance stays invalid. The IMU
-// holds the last heading and reports no rate. A wheel bank reports no
-// travel. Reset plant connects every sensor again.
+// Mass, top speed, launch acceleration, and friction are the rigid-body
+// motor. Yaw inertia 1 is a uniform rectangle. Traction is the grip
+// coefficient before a wheel slips. A disconnected port reports nothing.
+// Distance stays invalid. The IMU holds the last heading and reports no
+// rate. A wheel bank reports no travel. Reset plant connects every sensor
+// again.
 struct PlantOverride {
-    double velocity_tau_sec = 0;
-    double skid_tau_sec = 0;
-    double speed_scale = 0;
+    double mass_kg = 6;
+    double max_vel_mps = 3;
+    double drive_accel_mps2 = 6;
+    double static_friction_n = 0;
+    double yaw_inertia_scale = 1;
+    double yaw_friction_nm = 0;
+    double skid_tau_sec = 0.3;
+    double lateral_friction_n = 0;
+    double traction_mu = 1;
     int voltage_delay_ticks = 0;
-    double lin_friction_v = 0;
-    double lin_vel_scale = 1;
-    double lin_accel_scale = 1;
-    double ang_friction_v = 0;
-    double ang_vel_scale = 1;
-    double ang_accel_scale = 1;
     bool imu_off = false;
     bool enc_left_off = false;
     bool enc_right_off = false;

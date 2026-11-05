@@ -12,8 +12,8 @@ DrivePolicy::read:
 
 The action is surge and yaw. This chassis cannot command sway, so the
 plant step sends that axis as zero. reset() returns a dict: "obs" is the
-actor vector, "priv" is the ground-truth pose, slip, and the friction
-parameters the critic sees during training.
+actor vector, "priv" is the ground-truth pose, slip, and the mass,
+top speed, launch acceleration, and static friction the critic sees.
 
 The thrust schedule is full throttle except on clock ramps. A ramp falls
 to zero and rises back at a constant slope in time, whether or not the
@@ -432,20 +432,20 @@ _YAW_NOISE_RAD = 0.08
 
 def _dynamics_bounds():
     """Uniform window around the nominal plant. Shared by reset and the critic."""
-    tau = float(plant.VELOCITY_TAU)
-    skid = float(plant.SKID_TAU)
-    resistance = float(plant.SIDE_RESISTANCE)
-    scale = float(plant.SPEED_SCALE)
+    mass = float(plant.MASS_KG)
+    vel = float(plant.MAX_VEL_MPS)
+    accel = float(plant.DRIVE_ACCEL)
+    friction = float(plant.STATIC_FRICTION_N)
     return (
-        (0.5 * tau, 2.0 * tau),
-        (0.35 * skid, 3.0 * skid),
-        (0.65 * resistance, 1.6 * resistance),
-        (0.75 * scale, 1.15 * scale),
+        (0.85 * mass, 1.15 * mass),
+        (0.80 * vel, 1.15 * vel),
+        (0.65 * accel, 1.45 * accel),
+        (0.50 * friction, 1.80 * friction),
     )
 
 
 def _sample_dynamics(rng):
-    """Uniform draw. Skid is the wide axis: tiles, dust, and roller wear."""
+    """Uniform draw of mass, top speed, launch accel, and static friction."""
     return tuple(float(rng.uniform(lo, hi)) for lo, hi in _dynamics_bounds())
 
 
@@ -483,7 +483,7 @@ class PathFollowEnv(gym.Env):
         self._lags = np.asarray(plant.HISTORY_LAG, dtype=np.int64)
         self._hist_depth = int(self._lags.max()) + 1
         actor = spaces.Box(low=-np.inf, high=np.inf, shape=(int(plant.FEATURE_COUNT),), dtype=np.float32)
-        # pose (x, y, sin, cos), body velocity, and the four dynamics knobs.
+        # pose (x, y, sin, cos), body velocity, mass, top speed, accel, friction.
         priv = spaces.Box(low=-np.inf, high=np.inf, shape=(11,), dtype=np.float32)
         self.observation_space = spaces.Dict({"obs": actor, "priv": priv})
         self.action_space = spaces.Box(
@@ -526,8 +526,13 @@ class PathFollowEnv(gym.Env):
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         self.plant.set_goal_align(False)
-        velocity_tau, skid_tau, resistance, speed_scale = _sample_dynamics(self.np_random)
-        self.plant.set_dynamics(velocity_tau, skid_tau, resistance, speed_scale)
+        mass, vel, accel, friction = _sample_dynamics(self.np_random)
+        self.plant.set_dynamics(
+            mass, vel, accel, friction,
+            float(plant.SKID_TAU), float(plant.SIDE_RESISTANCE),
+            float(plant.YAW_INERTIA_SCALE), float(plant.YAW_FRICTION_NM),
+            float(plant.LATERAL_FRICTION_N), float(plant.TRACTION_MU),
+        )
         self._path = generate_path(self.np_random, self._stage)
         self._hint = 0
         self._steps = 0
@@ -738,7 +743,7 @@ class PathFollowEnv(gym.Env):
         center_y = float(plant.FIELD_CENTER_Y_IN)
         lin = float(plant.MAX_VEL_LIN)
         ang = float(plant.MAX_VEL_ANG)
-        tau, skid, resistance, scale = self.plant.dynamics()
+        mass, vel, accel, friction = self.plant.dynamics()
         bounds = _dynamics_bounds()
         values = (
             float(state.x_in) / half,
@@ -748,10 +753,10 @@ class PathFollowEnv(gym.Env):
             float(state.v_lin) / lin,
             float(state.v_lat) / lin,
             float(state.v_ang) / ang,
-            _span_unit(tau, bounds[0]),
-            _span_unit(skid, bounds[1]),
-            _span_unit(resistance, bounds[2]),
-            _span_unit(scale, bounds[3]),
+            _span_unit(mass, bounds[0]),
+            _span_unit(vel, bounds[1]),
+            _span_unit(accel, bounds[2]),
+            _span_unit(friction, bounds[3]),
         )
         return np.asarray(values, dtype=np.float32)
 

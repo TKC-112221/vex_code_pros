@@ -14,10 +14,14 @@
 
 namespace {
 
-double inertiaKgM2() {
+double inertiaKgM2(double mass_kg, double yaw_scale) {
     const double length = Robot::Chassis::BODY_LENGTH_M;
     const double width = Robot::Chassis::TRACK_WIDTH_M;
-    return MockPlant::MASS_KG * (length * length + width * width) / 12.0;
+    double mass = mass_kg;
+    double scale = yaw_scale;
+    if (!(mass > 0.05)) mass = 0.05;
+    if (!(scale > 0.05)) scale = 0.05;
+    return mass * scale * (length * length + width * width) / 12.0;
 }
 
 void pointVelocity(const ContactBody& body, double px, double py, double& vpx, double& vpy) {
@@ -35,25 +39,26 @@ void pointVelocity(const ContactBody& body, double px, double py, double& vpx, d
 // normal: it is the force that removes this corner's into-wall velocity
 // and nothing more, so the bumper does not throw the chassis back out.
 void applyNormalImpulse(ContactBody& body, double px, double py,
-                        double nx, double ny, double j) {
+                        double nx, double ny, double j,
+                        double mass_kg, double inertia) {
     const double rx = px - body.x_m;
     const double ry = py - body.y_m;
     const double ix = j * nx;
     const double iy = j * ny;
-    const double dvx = ix / MockPlant::MASS_KG;
-    const double dvy = iy / MockPlant::MASS_KG;
+    const double dvx = ix / mass_kg;
+    const double dvy = iy / mass_kg;
     const double c = mathutil::heading_cos(body.theta);
     const double s = mathutil::heading_sin(body.theta);
     body.v_fwd += dvx * c + dvy * s;
     body.v_lat += -dvx * s + dvy * c;
-    body.omega += (rx * iy - ry * ix) / inertiaKgM2();
+    body.omega += (rx * iy - ry * ix) / inertia;
 }
 
 // Returns the body-forward part of the separation nudge. The caller adds it
 // to the travel already integrated, so encoders match the pose that remains
 // inside the wall.
 double pushCorner(ContactBody& body, double px, double py, double pen,
-                  double nx, double ny) {
+                  double nx, double ny, double mass_kg, double inertia) {
     if (pen <= 0.0) return 0.0;
 
     double vpx = 0.0;
@@ -64,9 +69,8 @@ double pushCorner(ContactBody& body, double px, double py, double pen,
         const double rx = px - body.x_m;
         const double ry = py - body.y_m;
         const double rn = rx * ny - ry * nx;
-        const double inertia = inertiaKgM2();
-        const double denom = 1.0 / MockPlant::MASS_KG + (rn * rn) / inertia;
-        if (denom > 1e-9) applyNormalImpulse(body, px, py, nx, ny, -v_n / denom);
+        const double denom = 1.0 / mass_kg + (rn * rn) / inertia;
+        if (denom > 1e-9) applyNormalImpulse(body, px, py, nx, ny, -v_n / denom, mass_kg, inertia);
     }
 
     // Bleed the overlap out along the same normal. Most of it, not all, so
@@ -81,7 +85,7 @@ double pushCorner(ContactBody& body, double px, double py, double pen,
     return (nx * corr) * c + (ny * corr) * s;
 }
 
-double wallImpulses(ContactBody& body) {
+double wallImpulses(ContactBody& body, double mass_kg, double inertia) {
     const double half_l = Robot::Chassis::BODY_LENGTH_M * 0.5;
     const double half_w = Robot::Chassis::TRACK_WIDTH_M * 0.5;
     const double x_min = Robot::Range::FIELD_X_MIN_M;
@@ -107,7 +111,7 @@ double wallImpulses(ContactBody& body) {
                 if (nx < 0.0) pen = px - x_max;
                 else if (nx > 0.0) pen = x_min - px;
                 else if (ny < 0.0) pen = py - y_max;
-                forward_nudge += pushCorner(body, px, py, pen, nx, ny);
+                forward_nudge += pushCorner(body, px, py, pen, nx, ny, mass_kg, inertia);
             };
             hit(-1.0, 0.0);
             hit(1.0, 0.0);
@@ -196,22 +200,43 @@ void clampMotion(ContactBody& body, double limit) {
     }
 }
 
-void bleedSkid(ContactBody& body, double dt, double tau, double limit) {
+// Viscous roller drag plus Coulomb. The steady slide is still
+// v_lat = tau * (coriolis - friction / mass). Friction can hold a stop
+// when the yaw-induced lateral accel does not exceed it.
+void bleedSkid(ContactBody& body, double dt, double tau, double limit,
+               double mass_kg, double coulomb_n) {
     if (tau < 1e-4) {
         body.v_lat = 0.0;
         return;
     }
+    const double coriolis = -body.omega * body.v_fwd;
+    const double hold = (mass_kg > 1e-6) ? coulomb_n / mass_kg : 0.0;
     const double decay = std::exp(-dt / tau);
-    const double lat = body.v_lat * decay
-        + (-body.omega * body.v_fwd) * tau * (1.0 - decay);
-    body.v_lat = mathutil::clamp_val(lat, -limit, limit);
+    auto toward = [&](double sgn) {
+        const double eq = (coriolis - hold * sgn) * tau;
+        return eq + (body.v_lat - eq) * decay;
+    };
+    if (std::fabs(body.v_lat) <= 1e-3) {
+        if (std::fabs(coriolis) <= hold) {
+            body.v_lat = 0.0;
+            return;
+        }
+        body.v_lat = mathutil::clamp_val(toward(mathutil::sign(coriolis)), -limit, limit);
+        return;
+    }
+    double next = toward(mathutil::sign(body.v_lat));
+    if (body.v_lat * next < 0.0 && std::fabs(coriolis) <= hold) next = 0.0;
+    body.v_lat = mathutil::clamp_val(next, -limit, limit);
 }
 
 // One free slice: roller skid, commanded body motion, then the walls.
 void integrateSlice(ContactBody& body, double h, ContactStep& stepped,
-                    double skid_tau, double speed_limit) {
+                    const ContactParams& params) {
     const double lat0 = body.v_lat;
-    bleedSkid(body, h, skid_tau, speed_limit);
+    const double mass = (params.mass_kg > 0.05) ? params.mass_kg : 0.05;
+    const double inertia = inertiaKgM2(mass, params.yaw_inertia_scale);
+    bleedSkid(body, h, params.skid_tau_sec, params.speed_limit_mps,
+              mass, params.lateral_friction_n);
     const double lat_avg = 0.5 * (lat0 + body.v_lat);
 
     const double yaw = body.omega * h;
@@ -223,7 +248,7 @@ void integrateSlice(ContactBody& body, double h, ContactStep& stepped,
     body.theta += yaw;
     stepped.forward_m += body.v_fwd * h;
     stepped.yaw_rad += yaw;
-    stepped.forward_m += wallImpulses(body);
+    stepped.forward_m += wallImpulses(body, mass, inertia);
 }
 
 // Translate the center until every corner is inside. A chassis this size
@@ -274,13 +299,24 @@ void separateWalls(ContactBody& body) {
 
 } // namespace
 
-void holdWallContact(ContactBody& body) {
-    wallImpulses(body);
+void holdWallContact(ContactBody& body, const ContactParams& params) {
+    const double mass = (params.mass_kg > 0.05) ? params.mass_kg : 0.05;
+    wallImpulses(body, mass, inertiaKgM2(mass, params.yaw_inertia_scale));
     separateWalls(body);
 }
 
-ContactStep stepContacts(ContactBody& body, double dt,
-                         double skid_tau_sec, double speed_limit_mps) {
+void holdWallContact(ContactBody& body) {
+    ContactParams params;
+    params.skid_tau_sec = MockPlant::SKID_TAU_SEC;
+    params.speed_limit_mps = MockPlant::MAX_VEL_MPS * 1.5;
+    if (!(params.speed_limit_mps > 0.5)) params.speed_limit_mps = 0.5;
+    params.mass_kg = MockPlant::MASS_KG;
+    params.yaw_inertia_scale = MockPlant::YAW_INERTIA_SCALE;
+    params.lateral_friction_n = MockPlant::LATERAL_FRICTION_N;
+    holdWallContact(body, params);
+}
+
+ContactStep stepContacts(ContactBody& body, double dt, const ContactParams& params) {
     ContactStep stepped;
     if (!(dt > 0.0)) {
         separateWalls(body);
@@ -290,7 +326,8 @@ ContactStep stepContacts(ContactBody& body, double dt,
 
     const int substeps = (MockPlant::CONTACT_SUBSTEPS > 1) ? MockPlant::CONTACT_SUBSTEPS : 1;
     const double h = dt / static_cast<double>(substeps);
-    const double loose = speed_limit_mps * 2.0;
+    const double limit = (params.speed_limit_mps > 1e-3) ? params.speed_limit_mps : 1e-3;
+    const double loose = limit * 2.0;
     // Wheel speed at the start of the step. The snap rewrites body speed,
     // and that rewrite must not look like a reverse release mid-step.
     const double commanded_omega = body.omega;
@@ -299,7 +336,7 @@ ContactStep stepContacts(ContactBody& body, double dt,
     for (int i = 0; i < substeps; ++i) {
         ContactBody moved = body;
         ContactStep slice;
-        integrateSlice(moved, h, slice, skid_tau_sec, speed_limit_mps);
+        integrateSlice(moved, h, slice, params);
 
         double gx = 0.0;
         double gy = 0.0;
@@ -314,7 +351,7 @@ ContactStep stepContacts(ContactBody& body, double dt,
         }
         clampMotion(body, loose);
     }
-    clampMotion(body, speed_limit_mps);
+    clampMotion(body, limit);
     goalAlignPhysicsDone();
     return stepped;
 }

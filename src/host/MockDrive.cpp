@@ -3,11 +3,11 @@
  * same per-actuator safety as TankDrive, backed by a simulated wheel plant
  * instead of the PROS V5 API.
  *
- * Each side is a first-order lag toward (voltage / max_volts) * MAX_VEL_LIN,
- * so a held voltage settles at a finite speed and zero voltage coasts to a
- * stop. The field window can split that lag: linear and angular friction eat
- * voltage before the axis moves, and each axis has its own settled speed and
- * rise time. With those knobs on the compiled tick the sides stay one lag.
+ * Each side is a DC motor on one rigid body. Electromagnetic force is
+ * linear in voltage and opposed by back-EMF, Coulomb friction holds a
+ * stop, and a wheel that asks for more than μ N slips. Mass, free speed,
+ * launch acceleration, and the two friction terms are MockPlant, so a log
+ * fit can move them without changing the integrator.
  * service() is the desktop stand-in for the 10 ms of real time that
  * elapses between pipeline ticks: it integrates the plant and redraws the
  * estimator pose. The keyboard is the V5 controller.
@@ -118,15 +118,13 @@ void MockDrive::setBatteryVoltage(double volts) {
 }
 
 MockDrive::PlantSnapshot MockDrive::plantSnapshot() const {
-    const double v_fwd = (left_mps_ + right_mps_) * 0.5;
-    const double omega = (right_mps_ - left_mps_) / Robot::Chassis::TRACK_WIDTH_M;
     PlantSnapshot s;
     s.x_in = metersToInches(true_x_);
     s.y_in = metersToInches(true_y_);
     s.theta = heading_rad_ + imu_offset_;
-    s.v_lin = v_fwd;
+    s.v_lin = body_fwd_;
     s.v_lat = lat_mps_;
-    s.v_ang = omega;
+    s.v_ang = body_omega_;
     s.left_amps = left_amps_;
     s.right_amps = right_amps_;
     return s;
@@ -140,16 +138,20 @@ void MockDrive::setPlant(double x_in, double y_in, double theta,
     imu_offset_ = 0.0;
     imu_plant_heading_ = theta;
     lat_mps_ = v_lat;
+    body_fwd_ = v_lin;
+    body_omega_ = v_ang;
+    left_slip_ = right_slip_ = false;
     const double half = Robot::Chassis::TRACK_WIDTH_M * 0.5;
-    left_mps_ = clamp_val(v_lin - v_ang * half, -Robot::MAX_VEL_LIN, Robot::MAX_VEL_LIN);
-    right_mps_ = clamp_val(v_lin + v_ang * half, -Robot::MAX_VEL_LIN, Robot::MAX_VEL_LIN);
+    const double cap = speedCeiling();
+    left_mps_ = clamp_val(v_lin - v_ang * half, -cap, cap);
+    right_mps_ = clamp_val(v_lin + v_ang * half, -cap, cap);
     plant_left_v_ = plant_right_v_ = 0.0;
     left_amps_ = right_amps_ = 0.0;
     volt_surge_ = volt_yaw_ = 0.0;
     volt_primed_ = false;
-    prev_v_fwd_ = (left_mps_ + right_mps_) * 0.5;
-    prev_v_lat_ = lat_mps_;
     settleContacts(0.0);
+    prev_v_fwd_ = body_fwd_;
+    prev_v_lat_ = lat_mps_;
     // Clockwise rotation. With the offset at zero, the next heading read
     // equals the placed heading, including a nudge settleContacts applied.
     imu_rotation_deg_ = -(heading_rad_ + imu_offset_) * (180.0 / M_PI);
@@ -192,6 +194,8 @@ void MockDrive::armLocalization(std::uint64_t seed) {
 void MockDrive::resetSensors() {
     left_m_ = right_m_ = 0.0;
     left_mps_ = right_mps_ = 0.0;
+    body_fwd_ = body_omega_ = 0.0;
+    left_slip_ = right_slip_ = false;
     plant_left_v_ = plant_right_v_ = 0.0;
     left_amps_ = right_amps_ = 0.0;
     volt_surge_ = volt_yaw_ = 0.0;
@@ -283,9 +287,9 @@ ChassisObservation MockDrive::readObservation(double prev_heading_rad) {
         o.v_ang = -rate * (M_PI / 180.0);
         // Specific force of the plant over the step that just finished, in G.
         // Localization integrates this, so the sim's skid is part of the delta.
-        const double v_fwd = (left_mps_ + right_mps_) * 0.5;
+        const double v_fwd = body_fwd_;
         const double v_lat = lat_mps_;
-        const double omega = (right_mps_ - left_mps_) / Robot::Chassis::TRACK_WIDTH_M;
+        const double omega = body_omega_;
         double ax = 0.0, ay = 0.0;
         if (dt > 1e-6) {
             ax = (v_fwd - prev_v_fwd_) / dt - omega * prev_v_lat_;
@@ -412,24 +416,29 @@ ChassisCommand MockDrive::applyDrive(const ChassisCommand& cmd, const ChassisObs
 
     if (CT::CURRENT_LIMITING) applyCurrentLimit(left_v, right_v, obs.v_lin, obs.v_ang);
 
-    if (CT::VOLTAGE_CLAMP) {
-        double max_abs = std::max(std::fabs(left_v), std::fabs(right_v));
-        if (max_abs > System::MAX_VOLTS) {
-            double scale = System::MAX_VOLTS / max_abs;
-            left_v *= scale;
-            right_v *= scale;
+    // Same pair scale as TankDrive: keep yaw when one side would saturate.
+    auto scalePair = [](double& left, double& right, double cap) {
+        const double peak = std::max(std::fabs(left), std::fabs(right));
+        if (peak > cap && peak > 1e-9) {
+            const double scale = cap / peak;
+            left *= scale;
+            right *= scale;
         }
-    }
+    };
+    const double rail = (max_voltage_ > 1e-6) ? max_voltage_ : System::MAX_VOLTS;
+    scalePair(left_v, right_v, rail);
 
     double batt_scale = 1.0;
     if (use_battery_scaling_) {
         batt_scale = (battery_voltage_ > Controls::BATTERY_VALID_V) ? (System::MAX_VOLTS / battery_voltage_) : 1.0;
     }
+    left_v *= batt_scale;
+    right_v *= batt_scale;
+    scalePair(left_v, right_v, rail);
 
-    plant_left_v_  = left_v  * batt_scale;
-    plant_right_v_ = right_v * batt_scale;
+    plant_left_v_  = left_v;
+    plant_right_v_ = right_v;
 
-    // Report the applied effort (post-safety, pre battery scaling) as chassis.
     ChassisCommand applied;
     applied.linear  = (left_v + right_v) / 2.0;
     applied.angular = (right_v - left_v) / 2.0;
@@ -478,46 +487,52 @@ void MockDrive::stepCascade(double dt_seconds) {
     cascade_torque_ = amps * 0.08 * sign(cmd);
 }
 
-void MockDrive::setDynamics(double velocity_tau_sec, double skid_tau_sec,
-                            double side_resistance_ohm, double speed_scale) {
-    if (velocity_tau_sec > 1e-3) velocity_tau_ = velocity_tau_sec;
-    if (skid_tau_sec > 1e-3) skid_tau_ = skid_tau_sec;
-    if (side_resistance_ohm > 1e-3) side_resistance_ = side_resistance_ohm;
-    if (speed_scale > 1e-3) speed_scale_ = speed_scale;
+namespace {
+
+double bounded(double value, double lo, double hi) {
+    if (!(value > lo)) return lo;
+    if (value > hi) return hi;
+    return value;
 }
 
-void MockDrive::setAxisResponse(double lin_friction_v, double lin_vel_scale, double lin_accel_scale,
-                                double ang_friction_v, double ang_vel_scale, double ang_accel_scale) {
-    auto friction = [](double volts) {
-        if (volts < 0.0) return 0.0;
-        if (volts > 24.0) return 24.0;
-        return volts;
-    };
-    auto scale = [](double value) {
-        if (value < 0.05) return 0.05;
-        if (value > 8.0) return 8.0;
-        return value;
-    };
-    lin_friction_v_ = friction(lin_friction_v);
-    ang_friction_v_ = friction(ang_friction_v);
-    lin_vel_scale_ = scale(lin_vel_scale);
-    ang_vel_scale_ = scale(ang_vel_scale);
-    lin_accel_scale_ = scale(lin_accel_scale);
-    ang_accel_scale_ = scale(ang_accel_scale);
+double nonNegative(double value, double hi) {
+    if (!(value > 0.0)) return 0.0;
+    if (value > hi) return hi;
+    return value;
 }
 
-bool MockDrive::axisResponseIsIdentity() const {
-    return lin_friction_v_ <= 1e-9 && ang_friction_v_ <= 1e-9
-        && std::fabs(lin_vel_scale_ - 1.0) <= 1e-9
-        && std::fabs(ang_vel_scale_ - 1.0) <= 1e-9
-        && std::fabs(lin_accel_scale_ - 1.0) <= 1e-9
-        && std::fabs(ang_accel_scale_ - 1.0) <= 1e-9;
+} // namespace
+
+void MockDrive::setDynamics(double mass_kg, double max_vel_mps, double drive_accel_mps2,
+                            double static_friction_n, double skid_tau_sec,
+                            double side_resistance_ohm, double yaw_inertia_scale,
+                            double yaw_friction_nm, double lateral_friction_n,
+                            double traction_mu) {
+    mass_kg_ = bounded(mass_kg, 0.4, 40.0);
+    max_vel_mps_ = bounded(max_vel_mps, 0.05, 20.0);
+    drive_accel_mps2_ = bounded(drive_accel_mps2, 0.05, 80.0);
+    static_friction_n_ = nonNegative(static_friction_n, 400.0);
+    if (skid_tau_sec > 1e-3) skid_tau_ = bounded(skid_tau_sec, 0.01, 5.0);
+    if (side_resistance_ohm > 1e-3) side_resistance_ = bounded(side_resistance_ohm, 0.05, 40.0);
+    yaw_inertia_scale_ = bounded(yaw_inertia_scale, 0.05, 20.0);
+    yaw_friction_nm_ = nonNegative(yaw_friction_nm, 40.0);
+    lateral_friction_n_ = nonNegative(lateral_friction_n, 200.0);
+    traction_mu_ = bounded(traction_mu, 0.02, 4.0);
 }
 
-double MockDrive::responseSpeedLimit() const {
-    const double vmax = Robot::MAX_VEL_LIN * speed_scale_;
-    const double axis = (lin_vel_scale_ > ang_vel_scale_) ? lin_vel_scale_ : ang_vel_scale_;
-    return vmax * axis;
+double MockDrive::speedCeiling() const {
+    const double cap = max_vel_mps_ * 1.5;
+    return (cap > 0.5) ? cap : 0.5;
+}
+
+double MockDrive::motorCurrent(double volts, double wheel_mps) const {
+    const double vnom = MockPlant::NOMINAL_VOLTS;
+    const double f_per_volt =
+        (mass_kg_ * drive_accel_mps2_ + static_friction_n_) / (2.0 * vnom);
+    const double b_emf = (mass_kg_ * drive_accel_mps2_) / (2.0 * max_vel_mps_);
+    const double ke = (f_per_volt > 1e-9) ? b_emf / f_per_volt : 0.0;
+    const double unlim = (volts - ke * wheel_mps) / side_resistance_;
+    return clamp_val(unlim, -MockPlant::CURRENT_LIMIT_A, MockPlant::CURRENT_LIMIT_A);
 }
 
 void MockDrive::setVoltageDelayTicks(int ticks) {
@@ -539,13 +554,104 @@ void MockDrive::delayCommand(double& left_v, double& right_v) {
     if (delay_head_ >= kVoltageDelayCap) delay_head_ = 0;
 }
 
+void MockDrive::integrateMotors(double dt_seconds, double left_v, double right_v) {
+    // Both sides at V_nom and speed v:
+    //   m a = 2 F_v V - 2 B v - F_s
+    // so the two fit numbers fix the motor:
+    //   2 F_v V_nom - F_s = m a_max
+    //   B = m a_max / (2 v_max)
+    const double mass = mass_kg_;
+    const double vnom = MockPlant::NOMINAL_VOLTS;
+    const double half = Robot::Chassis::TRACK_WIDTH_M * 0.5;
+    const double length = Robot::Chassis::BODY_LENGTH_M;
+    const double width = Robot::Chassis::TRACK_WIDTH_M;
+    double inertia = yaw_inertia_scale_ * mass * (length * length + width * width) / 12.0;
+    if (!(inertia > 1e-6)) inertia = 1e-6;
+    const double f_per_volt = (mass * drive_accel_mps2_ + static_friction_n_) / (2.0 * vnom);
+    const double b_emf = (mass * drive_accel_mps2_) / (2.0 * max_vel_mps_);
+    const double ke = (f_per_volt > 1e-9) ? b_emf / f_per_volt : 0.0;
+    const double yaw_n = (half > 1e-6) ? yaw_friction_nm_ / half : 0.0;
+    const double traction = traction_mu_ * mass * Robot::G_MPS2 * 0.5;
+    const double v_free = (b_emf > 1e-9) ? std::fabs(f_per_volt * vnom / b_emf) : max_vel_mps_;
+    const double v_cap = (v_free > max_vel_mps_ ? v_free : max_vel_mps_) * 1.25;
+    const double w_cap = (half > 1e-6) ? v_cap / half : 0.0;
+    const double i_lim = MockPlant::CURRENT_LIMIT_A;
+
+    auto electromagnetic = [&](double volts, double wheel) {
+        const double unlim = (volts - ke * wheel) / side_resistance_;
+        const double amps = clamp_val(unlim, -i_lim, i_lim);
+        return f_per_volt * amps * side_resistance_;
+    };
+    // Coulomb. A stop stays stopped until the force exceeds the limit.
+    // While moving, friction opposes that motion and is not allowed to
+    // reverse it inside this step; the caller clamps a zero crossing.
+    auto coulomb = [](double force, double speed, double limit) {
+        if (std::fabs(speed) <= 1e-2) {
+            if (std::fabs(force) <= limit) return 0.0;
+            return force - limit * sign(force);
+        }
+        return force - limit * sign(speed);
+    };
+
+    int substeps = static_cast<int>(std::lround(dt_seconds / 0.0025));
+    if (substeps < 1) substeps = 1;
+    if (substeps > 40) substeps = 40;
+    const double h = dt_seconds / static_cast<double>(substeps);
+
+    for (int step = 0; step < substeps; ++step) {
+        if (!left_slip_) left_mps_ = body_fwd_ - body_omega_ * half;
+        if (!right_slip_) right_mps_ = body_fwd_ + body_omega_ * half;
+
+        const double em_l = electromagnetic(left_v, left_mps_);
+        const double em_r = electromagnetic(right_v, right_mps_);
+        const double em_sum = em_l + em_r;
+        const double em_diff = em_r - em_l;
+        const double sum = coulomb(em_sum, body_fwd_, static_friction_n_);
+        const double diff = coulomb(em_diff, body_omega_, yaw_n);
+        const double want_l = 0.5 * (sum - diff);
+        const double want_r = 0.5 * (sum + diff);
+        const double g_l = clamp_val(want_l, -traction, traction);
+        const double g_r = clamp_val(want_r, -traction, traction);
+
+        // Rotating-frame term. Lateral drag is applied with the walls,
+        // on this same lat_mps_.
+        const double a = (g_l + g_r) / mass + body_omega_ * lat_mps_;
+        const double alpha = ((g_r - g_l) * half) / inertia;
+        double v_next = body_fwd_ + a * h;
+        double w_next = body_omega_ + alpha * h;
+        if (body_fwd_ * v_next < 0.0 && std::fabs(em_sum) <= static_friction_n_) v_next = 0.0;
+        if (body_omega_ * w_next < 0.0 && std::fabs(em_diff) <= yaw_n) w_next = 0.0;
+        body_fwd_ = clamp_val(v_next, -v_cap, v_cap);
+        body_omega_ = clamp_val(w_next, -w_cap, w_cap);
+
+        const double patch_l = body_fwd_ - body_omega_ * half;
+        const double patch_r = body_fwd_ + body_omega_ * half;
+        auto wheel = [&](bool& slip, double& speed, double want, double ground, double patch) {
+            if (std::fabs(want - ground) > 1e-3) {
+                slip = true;
+                speed += (want - ground) / MockPlant::WHEEL_MASS_KG * h;
+                speed = clamp_val(speed, -v_cap, v_cap);
+            } else {
+                slip = false;
+                speed = patch;
+            }
+        };
+        wheel(left_slip_, left_mps_, want_l, g_l, patch_l);
+        wheel(right_slip_, right_mps_, want_r, g_r, patch_r);
+    }
+}
+
 void MockDrive::settleContacts(double dt_seconds) {
-    // Wheel voltage has already become left/right speed. A wall then stops
-    // the corner that crossed it. The goal snap runs after that, in every
+    // The motor step already produced body speed. A wall then stops the
+    // corner that crossed it. The goal snap runs after that, in every
     // mode, and seats the front center on the point.
     const double half_track = Robot::Chassis::TRACK_WIDTH_M * 0.5;
-    const double v_fwd0 = (left_mps_ + right_mps_) * 0.5;
-    const double omega0 = (right_mps_ - left_mps_) / Robot::Chassis::TRACK_WIDTH_M;
+    const double saved_l = left_mps_;
+    const double saved_r = right_mps_;
+    const bool slip_l = left_slip_;
+    const bool slip_r = right_slip_;
+    const double v_fwd0 = body_fwd_;
+    const double omega0 = body_omega_;
 
     ContactBody body;
     body.x_m = true_x_;
@@ -555,9 +661,13 @@ void MockDrive::settleContacts(double dt_seconds) {
     body.v_lat = lat_mps_;
     body.omega = omega0;
 
-    const double wheel_cap = responseSpeedLimit();
-    const ContactStep stepped = stepContacts(
-        body, dt_seconds, skid_tau_, wheel_cap);
+    ContactParams params;
+    params.skid_tau_sec = skid_tau_;
+    params.speed_limit_mps = speedCeiling();
+    params.mass_kg = mass_kg_;
+    params.yaw_inertia_scale = yaw_inertia_scale_;
+    params.lateral_friction_n = lateral_friction_n_;
+    const ContactStep stepped = stepContacts(body, dt_seconds, params);
 
     true_x_ = body.x_m;
     true_y_ = body.y_m;
@@ -565,96 +675,58 @@ void MockDrive::settleContacts(double dt_seconds) {
         heading_rad_ += stepped.yaw_rad;
         // Wheels already counted the pre-contact roll. Put back the forward
         // travel and the yaw the contact removed, so an encoder reading
-        // matches the pose that stayed inside. The localization step reads
-        // that same encoder delta, so it stops with the wheels.
+        // matches the pose that stayed inside. Slip, which is wheel speed
+        // beyond that roll, is left on the encoder.
         const double dropped = v_fwd0 * dt_seconds - stepped.forward_m;
         const double extra_yaw = stepped.yaw_rad - omega0 * dt_seconds;
         left_m_  -= dropped + extra_yaw * half_track;
         right_m_ -= dropped - extra_yaw * half_track;
     }
 
-    lat_mps_ = clamp_val(body.v_lat, -wheel_cap, wheel_cap);
-    left_mps_ = clamp_val(body.v_fwd - body.omega * half_track, -wheel_cap, wheel_cap);
-    right_mps_ = clamp_val(body.v_fwd + body.omega * half_track, -wheel_cap, wheel_cap);
+    const double cap = speedCeiling();
+    const double w_cap = (half_track > 1e-6) ? cap / half_track : 0.0;
+    body_fwd_ = clamp_val(body.v_fwd, -cap, cap);
+    body_omega_ = clamp_val(body.omega, -w_cap, w_cap);
+    lat_mps_ = clamp_val(body.v_lat, -cap, cap);
+    const double patch_l = body_fwd_ - body_omega_ * half_track;
+    const double patch_r = body_fwd_ + body_omega_ * half_track;
+    // A wall or a goal grab changes forward speed or yaw. The wheels go
+    // with that. Roller skid changes only the lateral speed, and a
+    // spinning wheel is left where the motor put it.
+    const bool grabbed = std::fabs(body.v_fwd - v_fwd0) > 1e-4
+                      || std::fabs(body.omega - omega0) > 1e-4;
+    if (grabbed) {
+        left_slip_ = right_slip_ = false;
+        left_mps_ = patch_l;
+        right_mps_ = patch_r;
+    } else {
+        left_slip_ = slip_l;
+        right_slip_ = slip_r;
+        left_mps_ = slip_l ? clamp_val(saved_l, -cap, cap) : patch_l;
+        right_mps_ = slip_r ? clamp_val(saved_r, -cap, cap) : patch_r;
+    }
 }
 
 void MockDrive::stepSimulation(double dt_seconds) {
     if (dt_seconds <= 0.0) return;
 
-    double full_scale = (max_voltage_ > MockPlant::MIN_FULL_SCALE_V) ? max_voltage_ : System::MAX_VOLTS;
-    const double vmax = Robot::MAX_VEL_LIN * speed_scale_;
-    double blend = 1.0 - std::exp(-dt_seconds / velocity_tau_);
-    auto approach = [&](double mps, double volts) {
-        double target = (volts / full_scale) * vmax;
-        return clamp_val(mps + (target - mps) * blend, -vmax, vmax);
-    };
-    // The lag integrates the voltage from voltage_delay_ticks_ ago. Zero
-    // delay keeps this tick's command, which is the compiled plant.
+    // The motor integrates the voltage from voltage_delay_ticks_ ago.
+    // Zero delay keeps this tick's command, which is the compiled plant.
     double left_v = plant_left_v_;
     double right_v = plant_right_v_;
     delayCommand(left_v, right_v);
-    if (axisResponseIsIdentity()) {
-        left_mps_  = approach(left_mps_,  left_v);
-        right_mps_ = approach(right_mps_, right_v);
-    } else {
-        // Forward voltage is the average. Yaw voltage is V_R - V_L, so a
-        // full opposite pair is two full-scale rails and the yaw cap is
-        // twice the wheel cap divided by the track.
-        const double track = Robot::Chassis::TRACK_WIDTH_M;
-        const double half = track * 0.5;
-        auto tauFor = [&](double accel_scale) {
-            double tau = velocity_tau_ / accel_scale;
-            if (tau < 1e-3) tau = 1e-3;
-            return tau;
-        };
-        auto chase = [&](double speed, double volts, double cap, double volt_span,
-                         double tau, double friction) {
-            double used = volts;
-            if (friction > 0.0) {
-                if (std::fabs(speed) <= 1e-3) {
-                    if (std::fabs(volts) <= friction) used = 0.0;
-                    else used = volts - friction * sign(volts);
-                } else {
-                    used = volts - friction * sign(speed);
-                }
-            }
-            const double target = (volt_span > 1e-6) ? (used / volt_span) * cap : 0.0;
-            const double rise = 1.0 - std::exp(-dt_seconds / tau);
-            double next = speed + (target - speed) * rise;
-            // Friction may stop the axis. It may not reverse it. A command
-            // larger than friction and aimed the other way is allowed through.
-            const bool driven_through = (volts * speed < 0.0) && (std::fabs(volts) > friction);
-            if (speed * next < 0.0 && !driven_through) next = 0.0;
-            if (std::fabs(speed) <= 1e-3 && std::fabs(volts) <= friction) next = 0.0;
-            return clamp_val(next, -cap, cap);
-        };
-        const double v_cap = vmax * lin_vel_scale_;
-        const double w_cap = (half > 1e-6) ? (vmax / half) * ang_vel_scale_ : 0.0;
-        double v = (left_mps_ + right_mps_) * 0.5;
-        double w = (track > 1e-6) ? (right_mps_ - left_mps_) / track : 0.0;
-        v = chase(v, (left_v + right_v) * 0.5, v_cap, full_scale,
-                  tauFor(lin_accel_scale_), lin_friction_v_);
-        w = chase(w, right_v - left_v, w_cap, 2.0 * full_scale,
-                  tauFor(ang_accel_scale_), ang_friction_v_);
-        left_mps_ = v - w * half;
-        right_mps_ = v + w * half;
-    }
+    integrateMotors(dt_seconds, left_v, right_v);
 
     left_m_  += left_mps_  * dt_seconds;
     right_m_ += right_mps_ * dt_seconds;
 
     // Omni rollers, the goal-lock orbit, and wall contact all run in here,
-    // after the voltage has become wheel speed. A left turn while driving
+    // after the voltage has become body speed. A left turn while driving
     // forward still throws the robot to its right.
     settleContacts(dt_seconds);
 
-    const double v_sat = responseSpeedLimit();
-    auto amps = [&](double volts, double mps) {
-        double emf = (v_sat > 1e-6) ? (mps / v_sat) * full_scale : 0.0;
-        return (volts - emf) / side_resistance_;
-    };
-    left_amps_  = amps(left_v,  left_mps_);
-    right_amps_ = amps(right_v, right_mps_);
+    left_amps_  = motorCurrent(left_v, left_mps_);
+    right_amps_ = motorCurrent(right_v, right_mps_);
     stepCascade(dt_seconds);
 }
 
@@ -679,10 +751,11 @@ void MockDrive::service(double dt, const Pose2d& display_pose,
     // Host domain randomization. Training calls stepSimulation directly and
     // keeps whatever setDynamics stored, so a search is not pulled back here.
     const fieldwindow::PlantOverride over = fieldwindow::plantOverride();
-    setDynamics(over.velocity_tau_sec, over.skid_tau_sec, side_resistance_, over.speed_scale);
+    setDynamics(over.mass_kg, over.max_vel_mps, over.drive_accel_mps2,
+                over.static_friction_n, over.skid_tau_sec, side_resistance_,
+                over.yaw_inertia_scale, over.yaw_friction_nm,
+                over.lateral_friction_n, over.traction_mu);
     setVoltageDelayTicks(over.voltage_delay_ticks);
-    setAxisResponse(over.lin_friction_v, over.lin_vel_scale, over.lin_accel_scale,
-                    over.ang_friction_v, over.ang_vel_scale, over.ang_accel_scale);
 
     // Truth at sensor time, before this tick's integration, so it lines up
     // with the estimate the pipeline just published.

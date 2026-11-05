@@ -37,8 +37,9 @@
  *    cascade is holding that height.
  * 4. Drive into the goal along the approach. While the cascade drops,
  *    rotate to the detach heading when one was given. Then release the
- *    claw, back up on that heading, hand the drive to the driver, and
- *    lower the cascade to height 0.
+ *    claw, hold the goal grab off, back up on that heading (re-planning
+ *    if the chassis is still stuck on the post), hand the drive to the
+ *    driver, and lower the cascade to height 0.
  *
  * A drive that is stuck far from the goal, or an approach that never
  * gets close, cancels the macro so the routine can run the next command.
@@ -153,6 +154,9 @@ private:
     void enterDrop(const CascadeReading& sense, uint32_t now_ms);
     void enterRetreat(const StateEstimate& state, uint32_t now_ms, IMacroController& macros,
                       SubsystemCommand& out);
+    // 6 inch reverse on the leave heading. Re-armed when the follower is stuck
+    // still on the goal.
+    void armRetreat(const StateEstimate& state);
     // `avoid` keeps every other goal's circle. The goal being scored is
     // never one of them. The latch passes false and drives straight in.
     void armDrive(const Pose2d& pose, bool reverse, double line_in, bool avoid);

@@ -244,24 +244,33 @@ ChassisCommand TankDrive::applyDrive(const ChassisCommand& cmd, const ChassisObs
 
     if (CT::CURRENT_LIMITING) applyCurrentLimit(left_v, right_v, obs.v_lin, obs.v_ang);
 
-    if (CT::VOLTAGE_CLAMP) {
-        double max_abs = std::max(std::fabs(left_v), std::fabs(right_v));
-        if (max_abs > System::MAX_VOLTS) {
-            double scale = System::MAX_VOLTS / max_abs;
-            left_v *= scale; right_v *= scale;
+    // Keep left/right in proportion when either side would exceed the rail.
+    // A hard per-side clamp would drop only the saturated bank and invent yaw.
+    auto scalePair = [](double& left, double& right, double cap) {
+        const double peak = std::max(std::fabs(left), std::fabs(right));
+        if (peak > cap && peak > 1e-9) {
+            const double scale = cap / peak;
+            left *= scale;
+            right *= scale;
         }
-    }
+    };
+    scalePair(left_v, right_v, System::MAX_VOLTS);
 
     double batt_scale = 1.0;
     if (use_battery_scaling) {
         double batt = devread::batteryVolts();
         batt_scale = (batt > Controls::BATTERY_VALID_V) ? (System::MAX_VOLTS / batt) : 1.0;
     }
+    left_v *= batt_scale;
+    right_v *= batt_scale;
+    // Battery boost can push a side past what the motor accepts. Scale again
+    // so move_voltage does not clip one bank alone.
+    scalePair(left_v, right_v, System::MAX_VOLTS);
 
-    left_drive->move_voltage(devread::voltsToMv(left_v * batt_scale));
-    right_drive->move_voltage(devread::voltsToMv(right_v * batt_scale));
+    left_drive->move_voltage(devread::voltsToMv(left_v));
+    right_drive->move_voltage(devread::voltsToMv(right_v));
 
-    // Report the applied effort (post-safety, pre battery scaling) as chassis.
+    // Report the effort that went to the motors as chassis volts.
     ChassisCommand applied;
     applied.linear  = (left_v + right_v) / 2.0;
     applied.angular = (right_v - left_v) / 2.0;
